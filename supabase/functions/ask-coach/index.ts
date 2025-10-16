@@ -1,11 +1,15 @@
 /**
  * Supabase Edge Function: Ask Coach
  * Uses OpenAI Chat Completions API for nutrition coaching
+ * SECURITY: Requires authentication + server-side rate limiting
  */
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -20,6 +24,64 @@ serve(async (req) => {
   }
 
   try {
+    // ============================================
+    // SECURITY: Verify Authentication
+    // ============================================
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized: Missing auth token' }),
+        {
+          status: 401,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }
+      );
+    }
+
+    // Create Supabase client with user's auth token
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+
+    // Verify user is authenticated
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized: Invalid auth token' }),
+        {
+          status: 401,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }
+      );
+    }
+
+    // ============================================
+    // SECURITY: Check Rate Limit SERVER-SIDE
+    // ============================================
+    const { data: canProceed, error: rateLimitError } = await supabase.rpc(
+      'check_and_increment_coach_limit',
+      { user_uuid: user.id }
+    );
+
+    if (rateLimitError || !canProceed) {
+      return new Response(
+        JSON.stringify({ error: 'Rate limit exceeded. Please try again later.' }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }
+      );
+    }
+
     const { message, context } = await req.json();
 
     if (!message) {
