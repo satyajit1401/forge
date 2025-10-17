@@ -51,9 +51,6 @@ export default function MacroTable({ entries, onDeleteEntry, onDuplicateEntry }:
                 <tr key={entry.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors group">
                   <td className="py-3 px-3">
                     <div className="font-medium text-gray-900 text-sm">{entry.name}</div>
-                    {entry.description && entry.description !== entry.name && (
-                      <div className="text-xs text-gray-500 mt-0.5 line-clamp-1">{entry.description}</div>
-                    )}
                   </td>
                   <td className="py-3 px-3 text-right text-sm text-gray-900">{entry.calories}</td>
                   <td className="py-3 px-3 text-right text-sm text-gray-900">{entry.protein}g</td>
