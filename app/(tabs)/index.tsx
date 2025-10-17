@@ -309,7 +309,13 @@ export default function TrackScreen() {
   };
 
   return (
-    <div className="flex flex-col min-h-screen bg-gray-50">
+    <div
+      className="flex flex-col bg-gray-50"
+      style={{
+        minHeight: '100dvh', // Use dynamic viewport height for mobile browsers
+        WebkitOverflowScrolling: 'touch' // Smooth scrolling on iOS
+      }}
+    >
       {/* Error Message */}
       {error && (
         <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 max-w-lg w-11/12">
@@ -407,7 +413,13 @@ export default function TrackScreen() {
       )}
 
       {/* Scrollable Content */}
-      <div className="flex-1 overflow-y-auto px-4 md:px-6 lg:px-8 pt-3 pb-48">
+      <div
+        className="flex-1 overflow-y-auto px-4 md:px-6 lg:px-8 pt-3"
+        style={{
+          paddingBottom: 'calc(200px + env(safe-area-inset-bottom, 0px))',
+          WebkitOverflowScrolling: 'touch'
+        }}
+      >
         <div className="max-w-7xl mx-auto space-y-6">
           {/* View Toggle */}
           <div className="flex gap-2">

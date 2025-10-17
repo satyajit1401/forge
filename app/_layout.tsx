@@ -8,6 +8,7 @@ import 'react-native-reanimated';
 import { GluestackUIProvider } from '@gluestack-ui/themed';
 import { config } from '../gluestack-ui.config';
 import Head from 'expo-router/head';
+import { Platform } from 'react-native';
 import './global.css';
 
 import { useColorScheme } from '@/components/useColorScheme';
@@ -43,6 +44,20 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [loaded]);
+
+  // Register service worker for PWA (web only)
+  useEffect(() => {
+    if (Platform.OS === 'web' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker
+        .register('/service-worker.js')
+        .then((registration) => {
+          console.log('Service Worker registered:', registration);
+        })
+        .catch((error) => {
+          console.error('Service Worker registration failed:', error);
+        });
+    }
+  }, []);
 
   if (!loaded) {
     return null;

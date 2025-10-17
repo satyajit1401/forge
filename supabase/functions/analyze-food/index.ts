@@ -1,15 +1,14 @@
 /**
  * Supabase Edge Function: Analyze Food
- * Analyzes food from description and/or image using OpenAI GPT-4o with WEEKLY THREAD MEMORY
+ * Analyzes food from description and/or image using OpenAI GPT-4o with WEEKLY MEMORY
  * SECURITY: Requires authentication + server-side rate limiting
- * MEMORY: Maintains weekly conversation threads for consistent nutrition tracking
+ * MEMORY: Maintains weekly conversation history by fetching past week's food logs from database
  */
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
-const OPENAI_FOOD_ASSISTANT_ID = Deno.env.get('OPENAI_FOOD_ASSISTANT_ID');
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -70,39 +69,6 @@ function getWeekStart(date: Date = new Date()): string {
   return d.toISOString().split('T')[0];
 }
 
-// Helper: Create or get assistant
-async function getOrCreateAssistant(): Promise<string> {
-  // If assistant ID is in env, use it
-  if (OPENAI_FOOD_ASSISTANT_ID) {
-    return OPENAI_FOOD_ASSISTANT_ID;
-  }
-
-  // Otherwise create a new assistant
-  const response = await fetch('https://api.openai.com/v1/assistants', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-      'OpenAI-Beta': 'assistants=v2',
-    },
-    body: JSON.stringify({
-      name: 'Food Nutrition Analyzer',
-      instructions: SYSTEM_PROMPT,
-      model: 'gpt-4o',
-      response_format: { type: 'json_object' },
-      temperature: 0.3,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error('Failed to create assistant');
-  }
-
-  const data = await response.json();
-  console.log('Created new assistant:', data.id);
-  return data.id;
-}
-
 serve(async (req) => {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -138,7 +104,7 @@ serve(async (req) => {
       global: { headers: { Authorization: authHeader } },
     });
 
-    // Create service role client for thread updates
+    // Create service role client for admin operations
     const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     // Verify user is authenticated
@@ -194,70 +160,66 @@ serve(async (req) => {
     }
 
     // ============================================
-    // THREAD MANAGEMENT: Get or Create Weekly Thread
+    // MEMORY: Fetch Past Week's Food Logs
     // ============================================
     const currentWeekStart = getWeekStart();
 
-    // Get user's current thread info
-    const { data: userProfile } = await supabase
-      .from('user_profiles')
-      .select('food_thread_id, food_thread_week_start')
+    // Fetch user's food entries from this week
+    const { data: recentLogs, error: logsError } = await supabaseAdmin
+      .from('food_entries')
+      .select('name, description, calories, protein, created_at')
       .eq('user_id', user.id)
-      .single();
+      .gte('entry_date', currentWeekStart)
+      .order('created_at', { ascending: true });
 
-    let threadId = userProfile?.food_thread_id;
-    const threadWeekStart = userProfile?.food_thread_week_start;
-
-    // Check if we need a new thread (new week or no thread)
-    if (!threadId || threadWeekStart !== currentWeekStart) {
-      console.log('Creating new thread for week:', currentWeekStart);
-
-      // Create new thread
-      const threadResponse = await fetch('https://api.openai.com/v1/threads', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-          'OpenAI-Beta': 'assistants=v2',
-        },
-        body: JSON.stringify({}),
-      });
-
-      if (!threadResponse.ok) {
-        throw new Error('Failed to create thread');
-      }
-
-      const threadData = await threadResponse.json();
-      threadId = threadData.id;
-
-      // Update user profile with new thread info
-      await supabaseAdmin
-        .from('user_profiles')
-        .update({
-          food_thread_id: threadId,
-          food_thread_week_start: currentWeekStart,
-        })
-        .eq('user_id', user.id);
-
-      console.log('New thread created:', threadId);
-    } else {
-      console.log('Using existing thread:', threadId);
+    if (logsError) {
+      console.error('Error fetching food logs:', logsError);
+      // Continue without history if fetch fails - degraded but functional
     }
 
     // ============================================
-    // ADD MESSAGE TO THREAD
+    // BUILD CONVERSATION HISTORY
     // ============================================
-    const messageContent: any[] = [];
+    const messages: any[] = [
+      {
+        role: 'system',
+        content: SYSTEM_PROMPT,
+      },
+    ];
+
+    // Add past week's food logs as conversation history
+    if (recentLogs && recentLogs.length > 0) {
+      for (const log of recentLogs) {
+        // Add user message (what they described/logged)
+        messages.push({
+          role: 'user',
+          content: log.description || log.name,
+        });
+
+        // Add assistant response (what we analyzed it as)
+        messages.push({
+          role: 'assistant',
+          content: JSON.stringify({
+            name: log.name,
+            calories: log.calories,
+            protein: log.protein,
+          }),
+        });
+      }
+    }
+
+    // Add current request as user message
+    const currentUserContent: any[] = [];
 
     if (description) {
-      messageContent.push({
+      currentUserContent.push({
         type: 'text',
         text: description,
       });
     }
 
     if (image) {
-      messageContent.push({
+      currentUserContent.push({
         type: 'image_url',
         image_url: {
           url: image,
@@ -265,100 +227,37 @@ serve(async (req) => {
       });
     }
 
-    const messageResponse = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+    messages.push({
+      role: 'user',
+      content: currentUserContent,
+    });
+
+    // ============================================
+    // CALL OPENAI CHAT COMPLETIONS API
+    // ============================================
+    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
         'Content-Type': 'application/json',
-        'OpenAI-Beta': 'assistants=v2',
       },
       body: JSON.stringify({
-        role: 'user',
-        content: messageContent,
+        model: 'gpt-4o',
+        messages,
+        response_format: { type: 'json_object' },
+        temperature: 0.3,
+        max_tokens: 500,
       }),
     });
 
-    if (!messageResponse.ok) {
-      throw new Error('Failed to add message to thread');
+    if (!openaiResponse.ok) {
+      const errorText = await openaiResponse.text();
+      console.error('OpenAI API error:', errorText);
+      throw new Error(`OpenAI API error: ${openaiResponse.status}`);
     }
 
-    // ============================================
-    // RUN ASSISTANT
-    // ============================================
-    const assistantId = await getOrCreateAssistant();
-
-    const runResponse = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-        'OpenAI-Beta': 'assistants=v2',
-      },
-      body: JSON.stringify({
-        assistant_id: assistantId,
-      }),
-    });
-
-    if (!runResponse.ok) {
-      throw new Error('Failed to run assistant');
-    }
-
-    const runData = await runResponse.json();
-    const runId = runData.id;
-
-    // Poll for completion
-    let runStatus = 'queued';
-    let attempts = 0;
-    const maxAttempts = 30; // 30 seconds max
-
-    while (runStatus !== 'completed' && attempts < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-
-      const statusResponse = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'OpenAI-Beta': 'assistants=v2',
-        },
-      });
-
-      const statusData = await statusResponse.json();
-      runStatus = statusData.status;
-
-      if (runStatus === 'failed' || runStatus === 'cancelled' || runStatus === 'expired') {
-        throw new Error(`Run failed with status: ${runStatus}`);
-      }
-
-      attempts++;
-    }
-
-    if (runStatus !== 'completed') {
-      throw new Error('Run timed out');
-    }
-
-    // ============================================
-    // GET RESPONSE
-    // ============================================
-    const messagesResponse = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages?limit=1&order=desc`, {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'assistants=v2',
-      },
-    });
-
-    if (!messagesResponse.ok) {
-      throw new Error('Failed to get messages');
-    }
-
-    const messagesData = await messagesResponse.json();
-    const lastMessage = messagesData.data[0];
-
-    // Extract text content
-    const textContent = lastMessage.content.find((c: any) => c.type === 'text');
-    if (!textContent) {
-      throw new Error('No text response from assistant');
-    }
-
-    const result = JSON.parse(textContent.text.value);
+    const openaiData = await openaiResponse.json();
+    const result = JSON.parse(openaiData.choices[0].message.content || '{}');
 
     // Validate response has required fields
     if (!result.name || typeof result.calories !== 'number') {
