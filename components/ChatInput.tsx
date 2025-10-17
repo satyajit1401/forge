@@ -164,7 +164,7 @@ export default function ChatInput({ onFoodLogged }: ChatInputProps) {
             type="text"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="Describe your meal..."
+            placeholder="Add 1 or multiple items (e.g., 2 rotis, dal, rice)"
             className="flex-1 px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-400 bg-white text-sm text-gray-900 placeholder-gray-500 transition-all"
             disabled={loading}
           />
