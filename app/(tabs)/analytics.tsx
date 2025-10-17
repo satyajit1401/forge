@@ -59,7 +59,7 @@ export default function AnalyticsScreen() {
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
   };
 
   const formatDateTime = (dateString: string | null) => {
@@ -181,7 +181,7 @@ export default function AnalyticsScreen() {
                 yAxisColor="#E5E7EB"
                 xAxisColor="#E5E7EB"
                 yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
-                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 60, textAlign: 'center' }}
+                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
                 hideRules
                 isAnimated
                 animationDuration={300}
@@ -211,7 +211,7 @@ export default function AnalyticsScreen() {
                 yAxisColor="#E5E7EB"
                 xAxisColor="#E5E7EB"
                 yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
-                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 60, textAlign: 'center' }}
+                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
                 hideRules
                 isAnimated
                 animationDuration={300}
@@ -241,7 +241,7 @@ export default function AnalyticsScreen() {
                 yAxisColor="#E5E7EB"
                 xAxisColor="#E5E7EB"
                 yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
-                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 60, textAlign: 'center' }}
+                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
                 hideRules
                 isAnimated
                 animationDuration={300}

@@ -27,7 +27,17 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "name": "Forge - Nutrition Tracker",
+      "shortName": "Forge",
+      "description": "Track your nutrition, get AI-powered coaching, and reach your health goals",
+      "themeColor": "#000000",
+      "backgroundColor": "#ffffff",
+      "display": "standalone",
+      "orientation": "portrait",
+      "startUrl": "/",
+      "scope": "/",
+      "lang": "en"
     },
     "plugins": [
       "expo-router"

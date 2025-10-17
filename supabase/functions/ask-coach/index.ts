@@ -175,6 +175,18 @@ Remember: You're their accountability partner and trusted guide, not their docto
     const openaiData = await openaiResponse.json();
     const responseText = openaiData.choices[0].message.content;
 
+    // ============================================
+    // LOG API USAGE FOR ANALYTICS
+    // ============================================
+    // Use service role client to log usage (users don't have INSERT permission)
+    const supabaseAdmin = createClient(SUPABASE_URL, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+    await supabaseAdmin.rpc('log_api_usage', {
+      user_uuid: user.id,
+      action: 'coach_conversation',
+      was_success: true,
+      error_msg: null,
+    });
+
     return new Response(
       JSON.stringify({
         response: responseText,
