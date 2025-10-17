@@ -69,6 +69,23 @@ export default function TabLayout() {
     await signOut();
   };
 
+  const getHeaderRight = () => (
+    <HStack space="sm" mr="$3">
+      <Pressable
+        onPress={handleSettings}
+        style={({ pressed }) => ({ padding: 8, opacity: pressed ? 0.5 : 1 })}
+      >
+        <FontAwesome name="cog" size={20} color="#000" />
+      </Pressable>
+      <Pressable
+        onPress={handleSignOut}
+        style={({ pressed }) => ({ padding: 8, opacity: pressed ? 0.5 : 1 })}
+      >
+        <FontAwesome name="sign-out" size={20} color="#000" />
+      </Pressable>
+    </HStack>
+  );
+
   return (
     <Tabs
       screenOptions={{
@@ -93,22 +110,6 @@ export default function TabLayout() {
         options={{
           title: 'Track',
           tabBarIcon: ({ color }) => <TrackIcon color={color} />,
-          headerRight: () => (
-            <HStack space="sm" mr="$3">
-              <Pressable
-                onPress={handleSettings}
-                style={({ pressed }) => ({ padding: 8, opacity: pressed ? 0.5 : 1 })}
-              >
-                <FontAwesome name="cog" size={20} color="#000" />
-              </Pressable>
-              <Pressable
-                onPress={handleSignOut}
-                style={({ pressed }) => ({ padding: 8, opacity: pressed ? 0.5 : 1 })}
-              >
-                <FontAwesome name="sign-out" size={20} color="#000" />
-              </Pressable>
-            </HStack>
-          ),
         }}
       />
       <Tabs.Screen
@@ -116,6 +117,7 @@ export default function TabLayout() {
         options={{
           title: 'Dashboard',
           tabBarIcon: ({ color }) => <DashboardIcon color={color} />,
+          headerRight: getHeaderRight,
         }}
       />
       <Tabs.Screen
@@ -123,6 +125,7 @@ export default function TabLayout() {
         options={{
           title: 'Coach',
           tabBarIcon: ({ color }) => <CoachIcon color={color} />,
+          headerRight: getHeaderRight,
         }}
       />
       <Tabs.Screen
@@ -130,6 +133,7 @@ export default function TabLayout() {
         options={{
           title: 'Feedback',
           tabBarIcon: ({ color }) => <FeedbackIcon color={color} />,
+          headerRight: getHeaderRight,
         }}
       />
       {/* Admin-only Analytics Tab */}
@@ -139,6 +143,7 @@ export default function TabLayout() {
           title: 'Analytics',
           tabBarIcon: ({ color }) => <AnalyticsIcon color={color} />,
           href: isAdmin ? '/analytics' : null,
+          headerRight: getHeaderRight,
         }}
       />
     </Tabs>
