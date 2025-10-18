@@ -65,20 +65,23 @@ export const api = {
 
   /**
    * Ask the nutrition coach a question
-   * Calls Supabase Edge Function which calls OpenAI Assistants API
+   * Calls Supabase Edge Function which calls OpenAI Chat Completions API
    * @param message - User's question
    * @param context - Recent food logs and user settings
+   * @param conversationHistory - Previous messages in the conversation (for threading)
    * @returns Coach's response
    */
   askCoach: async (
     message: string,
-    context: CoachContext
+    context: CoachContext,
+    conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>
   ): Promise<{
     response: string;
   }> => {
     return invokeFunction('ask-coach', {
       message,
       context,
+      conversationHistory: conversationHistory || [],
     });
   },
 };

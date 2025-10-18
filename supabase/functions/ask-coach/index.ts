@@ -82,7 +82,7 @@ serve(async (req) => {
       );
     }
 
-    const { message, context } = await req.json();
+    const { message, context, conversationHistory = [] } = await req.json();
 
     if (!message) {
       return new Response(
@@ -100,7 +100,7 @@ serve(async (req) => {
     // Format context message
     const contextMessage = formatContext(context);
 
-    // Build messages for OpenAI Chat Completions API
+    // Build messages for OpenAI Chat Completions API (with conversation threading)
     const SYSTEM_PROMPT = `You are a trusted 1:1 nutrition coach and mentor for Indian clients. Your role is to be nurturing yet powerful—someone they can truly depend on for real transformation.
 
 Your Communication Style:
@@ -140,16 +140,30 @@ IMPORTANT: You have 14 days of food logs - that's usually PLENTY of context. Def
 
 Remember: You're their accountability partner and trusted guide, not their doctor or nutritionist writing a report. Be direct, supportive, and real.`;
 
-    const messages = [
+    // Build messages array with conversation threading from local memory
+    const messages: any[] = [
       {
         role: 'system',
         content: SYSTEM_PROMPT + '\n\n' + contextMessage,
       },
-      {
-        role: 'user',
-        content: message,
-      },
     ];
+
+    // Add conversation history from frontend (local memory threading)
+    // This maintains context without storing messages in database
+    if (conversationHistory && conversationHistory.length > 0) {
+      for (const msg of conversationHistory) {
+        messages.push({
+          role: msg.role, // 'user' or 'assistant'
+          content: msg.content,
+        });
+      }
+    }
+
+    // Add current user message
+    messages.push({
+      role: 'user',
+      content: message,
+    });
 
     // Call OpenAI Chat Completions API
     const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {

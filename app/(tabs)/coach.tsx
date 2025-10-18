@@ -125,8 +125,9 @@ export default function CoachScreen() {
         maintenanceCalories: settings.maintenance_calories,
       };
 
-      // Call API using abstraction (OpenAI key is safe on server!)
-      const response = await api.askCoach(userMessage, context);
+      // Call API using abstraction with conversation history (threading from local memory)
+      // This sends the full conversation to maintain context without storing in database
+      const response = await api.askCoach(userMessage, context, messages);
 
       // Add assistant response to chat
       setMessages((prev) => [...prev, { role: 'assistant', content: response.response }]);
