@@ -77,10 +77,13 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(request)
         .then((response) => {
+          // Clone BEFORE consuming the response
+          const responseToCache = response.clone();
+
           // Cache successful responses
           if (response.ok) {
             caches.open(RUNTIME_CACHE).then((cache) => {
-              cache.put(request, response.clone());
+              cache.put(request, responseToCache);
               // Limit auth cache size
               cleanupCache(RUNTIME_CACHE, 10);
             });
@@ -101,9 +104,12 @@ self.addEventListener('fetch', (event) => {
       caches.match(request).then((cachedResponse) => {
         const fetchPromise = fetch(request)
           .then((networkResponse) => {
+            // Clone BEFORE consuming the response
+            const responseToCache = networkResponse.clone();
+
             if (networkResponse.ok) {
               caches.open(RUNTIME_CACHE).then((cache) => {
-                cache.put(request, networkResponse.clone());
+                cache.put(request, responseToCache);
                 // Limit API cache size
                 cleanupCache(RUNTIME_CACHE, 100);
               });
@@ -134,10 +140,13 @@ self.addEventListener('fetch', (event) => {
 
         return fetch(request)
           .then((response) => {
+            // Clone BEFORE consuming the response
+            const responseToCache = response.clone();
+
             // Only cache successful same-origin responses
             if (response.ok && url.origin === self.location.origin) {
               caches.open(RUNTIME_CACHE).then((cache) => {
-                cache.put(request, response.clone());
+                cache.put(request, responseToCache);
                 // Limit static asset cache
                 cleanupCache(RUNTIME_CACHE, 100);
               });
@@ -161,10 +170,13 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(request)
       .then((response) => {
+        // Clone BEFORE consuming the response
+        const responseToCache = response.clone();
+
         // Cache successful HTML responses
         if (response.ok && request.destination === 'document') {
           caches.open(RUNTIME_CACHE).then((cache) => {
-            cache.put(request, response.clone());
+            cache.put(request, responseToCache);
           });
         }
         return response;
