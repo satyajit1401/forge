@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'expo-router';
 import { db } from '@/lib/database';
-import { cache } from '@/lib/cache';
+import { getCached, setCached, invalidate, CACHE_KEYS } from '@/lib/enhanced-cache';
 import { queueOperation, processQueue, checkOnlineStatus } from '@/utils/offline-queue';
 import { getFrequentItems } from '@/utils/frequent-items';
 import ChatInput from '@/components/ChatInput';
@@ -46,11 +46,7 @@ const formatDisplayDate = (dateStr: string): string => {
   }
 };
 
-// Cache keys
-const CACHE_KEYS = {
-  ENTRIES_PREFIX: 'food_entries_',
-  SETTINGS: 'user_settings',
-};
+// Note: CACHE_KEYS now imported from enhanced-cache for consistency
 
 export default function TrackScreen() {
   const [currentDate, setCurrentDate] = useState(getTodayDate());
@@ -102,7 +98,7 @@ export default function TrackScreen() {
     loadFrequentItems();
   }, [dataVersion]);
 
-  // Load entries and settings (Stale-While-Revalidate pattern)
+  // Load entries and settings (Stale-While-Revalidate pattern with L1/L2 cache)
   useEffect(() => {
     let isMounted = true;
 
@@ -110,23 +106,24 @@ export default function TrackScreen() {
       try {
         setError('');
 
-        // PHASE 1: Load from cache - INSTANT
-        const cacheKey = CACHE_KEYS.ENTRIES_PREFIX + currentDate;
-        const cachedEntries = cache.get<FoodEntry[]>(cacheKey);
-        const cachedSettings = cache.get<UserSettings>(CACHE_KEYS.SETTINGS);
+        // PHASE 1: Load from cache (L1 memory or L2 MMKV) - INSTANT
+        const cacheKey = CACHE_KEYS.entries(currentDate);
+        const cachedEntries = getCached<FoodEntry[]>(cacheKey);
+        const cachedSettings = getCached<UserSettings>(CACHE_KEYS.settings);
 
         if (cachedEntries !== null && cachedSettings !== null) {
-          // Show cached data immediately
+          // Show cached data immediately (no loading spinner!)
           if (isMounted) {
             setEntries(cachedEntries);
             setSettings(cachedSettings);
             setLoading(false);
           }
         } else {
+          // No cache - show loading spinner
           setLoading(true);
         }
 
-        // PHASE 2: Fetch fresh data from database (revalidate)
+        // PHASE 2: Fetch fresh data from database (revalidate in background)
         const [freshEntries, freshSettings] = await Promise.all([
           db.food.getByDate(currentDate),
           db.settings.get(),
@@ -134,11 +131,11 @@ export default function TrackScreen() {
 
         if (!isMounted) return;
 
-        // Update cache
-        cache.set(cacheKey, freshEntries);
-        cache.set(CACHE_KEYS.SETTINGS, freshSettings);
+        // Update cache (writes to both L1 and L2)
+        setCached(cacheKey, freshEntries);
+        setCached(CACHE_KEYS.settings, freshSettings);
 
-        // Update UI
+        // Update UI silently (data already showing if cached)
         setEntries(freshEntries);
         setSettings(freshSettings);
         setLoading(false);
@@ -183,8 +180,8 @@ export default function TrackScreen() {
     const optimisticEntries = [...entries, newEntry];
     setEntries(optimisticEntries);
 
-    const cacheKey = CACHE_KEYS.ENTRIES_PREFIX + currentDate;
-    cache.set(cacheKey, optimisticEntries);
+    const cacheKey = CACHE_KEYS.entries(currentDate);
+    setCached(cacheKey, optimisticEntries);
 
     // Check if online
     const isOnline = checkOnlineStatus();
@@ -204,10 +201,10 @@ export default function TrackScreen() {
       // Make API call using abstraction
       await db.food.add(currentDate, foodData);
 
-      // Reload fresh data
+      // Reload fresh data and update cache
       const updatedEntries = await db.food.getByDate(currentDate);
       setEntries(updatedEntries);
-      cache.set(cacheKey, updatedEntries);
+      setCached(cacheKey, updatedEntries);
       setDataVersion((prev) => prev + 1);
 
     } catch (err) {
@@ -223,7 +220,7 @@ export default function TrackScreen() {
       } else {
         setError('Failed to add entry. Please try again.');
         setEntries(entries);
-        cache.set(cacheKey, entries);
+        setCached(cacheKey, entries);
       }
     }
   };
@@ -235,8 +232,8 @@ export default function TrackScreen() {
     const optimisticEntries = entries.filter((entry) => entry.id !== entryId);
     setEntries(optimisticEntries);
 
-    const cacheKey = CACHE_KEYS.ENTRIES_PREFIX + currentDate;
-    cache.set(cacheKey, optimisticEntries);
+    const cacheKey = CACHE_KEYS.entries(currentDate);
+    setCached(cacheKey, optimisticEntries);
 
     const isOnline = checkOnlineStatus();
 
@@ -255,10 +252,10 @@ export default function TrackScreen() {
       // Use database abstraction
       await db.food.delete(entryId);
 
-      // Reload fresh data
+      // Reload fresh data and update cache
       const updatedEntries = await db.food.getByDate(currentDate);
       setEntries(updatedEntries);
-      cache.set(cacheKey, updatedEntries);
+      setCached(cacheKey, updatedEntries);
       setDataVersion((prev) => prev + 1);
 
     } catch (err) {
@@ -274,7 +271,7 @@ export default function TrackScreen() {
       } else {
         setError('Failed to delete entry. Please try again.');
         setEntries(originalEntries);
-        cache.set(cacheKey, originalEntries);
+        setCached(cacheKey, originalEntries);
       }
     }
   };

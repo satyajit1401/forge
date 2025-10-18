@@ -6,12 +6,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { api } from '@/lib/api';
 import { db } from '@/lib/database';
-import { cache } from '@/lib/cache';
+import { getCached, setCached, invalidate, CACHE_KEYS } from '@/lib/enhanced-cache';
 import type { ChatMessage, UserSettings } from '@/types';
 import { format, subDays } from 'date-fns';
 import ReactMarkdown from 'react-markdown';
-
-const COACH_MESSAGES_KEY = 'coach_messages';
 
 export default function CoachScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -21,16 +19,25 @@ export default function CoachScreen() {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
-  // Load settings and messages on mount
+  // Load settings and messages on mount (with enhanced caching)
   useEffect(() => {
     const loadData = async () => {
       try {
-        // Load settings
-        const userSettings = await db.settings.get();
-        setSettings(userSettings);
+        // Try to load settings from cache first
+        const cachedSettings = getCached<UserSettings>(CACHE_KEYS.settings);
+
+        if (cachedSettings) {
+          // Use cached settings immediately
+          setSettings(cachedSettings);
+        } else {
+          // No cache - fetch settings
+          const userSettings = await db.settings.get();
+          setSettings(userSettings);
+          setCached(CACHE_KEYS.settings, userSettings);
+        }
 
         // Load messages from cache
-        const savedMessages = cache.get<ChatMessage[]>(COACH_MESSAGES_KEY);
+        const savedMessages = getCached<ChatMessage[]>(CACHE_KEYS.chatMessages);
         if (savedMessages && Array.isArray(savedMessages) && savedMessages.length > 0) {
           setMessages(savedMessages);
         }
@@ -45,9 +52,9 @@ export default function CoachScreen() {
   // Save messages to cache whenever they change
   useEffect(() => {
     if (messages.length > 0) {
-      cache.set(COACH_MESSAGES_KEY, messages);
+      setCached(CACHE_KEYS.chatMessages, messages);
     } else {
-      cache.delete(COACH_MESSAGES_KEY);
+      invalidate(CACHE_KEYS.chatMessages);
     }
   }, [messages]);
 
@@ -63,7 +70,7 @@ export default function CoachScreen() {
   const handleClear = () => {
     setMessages([]);
     setError('');
-    cache.delete(COACH_MESSAGES_KEY);
+    invalidate(CACHE_KEYS.chatMessages);
   };
 
   const handleSend = async (e?: React.FormEvent) => {

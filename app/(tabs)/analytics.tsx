@@ -8,7 +8,11 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, useWindowDimensions } from 'react-native';
 import { LineChart } from 'react-native-gifted-charts';
 import { db } from '@/lib/database';
+import { getCached, setCached, CACHE_KEYS } from '@/lib/enhanced-cache';
 import type { AnalyticsSummary, DailyMetrics, UserMetric } from '@/types';
+
+// Cache TTL: 5 minutes (analytics don't need to be real-time)
+const ANALYTICS_CACHE_TTL = 5 * 60 * 1000;
 
 export default function AnalyticsScreen() {
   const { width: windowWidth } = useWindowDimensions();
@@ -24,15 +28,49 @@ export default function AnalyticsScreen() {
     loadAnalytics();
   }, []);
 
-  const loadAnalytics = async () => {
+  const loadAnalytics = async (forceRefresh = false) => {
     try {
-      setLoading(true);
+      // PHASE 1: Load from cache - INSTANT (skip if force refresh)
+      if (!forceRefresh) {
+        const cachedData = getCached<{
+          summary: AnalyticsSummary;
+          metrics: DailyMetrics;
+          users: UserMetric[];
+        }>(CACHE_KEYS.analytics);
+
+        if (cachedData) {
+          // Show cached data immediately (no loading spinner!)
+          setSummary(cachedData.summary);
+          setDailyMetrics(cachedData.metrics);
+          setUserMetrics(cachedData.users);
+          setLoading(false);
+        } else {
+          // No cache - show loading spinner
+          setLoading(true);
+        }
+      } else {
+        setLoading(true);
+      }
+
+      // PHASE 2: Fetch fresh data (revalidate in background)
       const [summaryData, metricsData, usersData] = await Promise.all([
         db.analytics.getSummary(),
         db.analytics.getDailyMetrics(30),
         db.analytics.getUserMetrics(),
       ]);
 
+      // Update cache with 5-minute TTL
+      setCached(
+        CACHE_KEYS.analytics,
+        {
+          summary: summaryData,
+          metrics: metricsData,
+          users: usersData,
+        },
+        ANALYTICS_CACHE_TTL
+      );
+
+      // Update UI silently (data already showing if cached)
       setSummary(summaryData);
       setDailyMetrics(metricsData);
       setUserMetrics(usersData);
@@ -47,9 +85,9 @@ export default function AnalyticsScreen() {
     setUpdatingTier(userId);
     try {
       await db.analytics.updateUserTier(userId, newTier);
-      // Reload user metrics to show updated tier
-      const usersData = await db.analytics.getUserMetrics();
-      setUserMetrics(usersData);
+
+      // Reload analytics and update cache
+      await loadAnalytics(true); // Force refresh to clear cache
     } catch (err) {
       console.error('Error updating tier:', err);
     } finally {
@@ -108,7 +146,7 @@ export default function AnalyticsScreen() {
             <p className="text-xs text-gray-500 mt-1">System-wide metrics and user management</p>
           </div>
           <button
-            onClick={loadAnalytics}
+            onClick={() => loadAnalytics(true)}
             className="px-4 py-2 border border-gray-200 bg-white rounded-lg text-sm font-medium text-gray-900 hover:bg-gray-50 transition-all"
           >
             Refresh
