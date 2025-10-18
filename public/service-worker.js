@@ -3,8 +3,8 @@
  * Implements caching strategies for offline support with proper error handling
  */
 
-const CACHE_NAME = 'forge-cache-v1';
-const RUNTIME_CACHE = 'forge-runtime-v1';
+const CACHE_NAME = 'forge-cache-v2';
+const RUNTIME_CACHE = 'forge-runtime-v2';
 const OFFLINE_URL = '/offline.html';
 
 // Files to cache immediately on install
@@ -99,7 +99,16 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Strategy: StaleWhileRevalidate for Supabase API (fast response, background update)
+  // BUT: Skip caching for mutations (POST/PUT/DELETE/PATCH) to avoid stale data
   if (url.hostname.includes('supabase.co')) {
+    // For mutations, always go to network (no caching)
+    if (request.method === 'POST' || request.method === 'PUT' ||
+        request.method === 'DELETE' || request.method === 'PATCH') {
+      event.respondWith(fetch(request));
+      return;
+    }
+
+    // For reads (GET), use StaleWhileRevalidate
     event.respondWith(
       caches.match(request).then((cachedResponse) => {
         const fetchPromise = fetch(request)
