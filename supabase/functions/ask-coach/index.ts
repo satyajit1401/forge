@@ -236,12 +236,21 @@ Remember: You're their accountability partner and trusted guide, not their docto
 function formatContext(context: any): string {
   const { recentLogs, targetCalories, targetProtein, maintenanceCalories } = context;
 
-  // Get current date for temporal context
+  // Get current date and time for temporal context (IST timezone)
   const today = new Date();
-  const dateOptions: Intl.DateTimeFormatOptions = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-  const formattedDate = today.toLocaleDateString('en-US', dateOptions);
+  const dateTimeOptions: Intl.DateTimeFormatOptions = {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata' // Indian Standard Time
+  };
+  const formattedDateTime = today.toLocaleString('en-US', dateTimeOptions);
 
-  let contextMsg = `**Current Date:** ${formattedDate}\n\n`;
+  let contextMsg = `**Current Date & Time:** ${formattedDateTime} IST\n\n`;
   contextMsg += `**User Context (Last 14 Days):**\n\n`;
 
   // Add targets
