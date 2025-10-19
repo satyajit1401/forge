@@ -66,6 +66,9 @@ export default function TrackScreen() {
   const [dataVersion, setDataVersion] = useState(0);
   const [viewMode, setViewMode] = useState<'table' | 'log'>('table');
 
+  // Track if we're currently mutating to prevent race conditions
+  const isMutatingRef = React.useRef(false);
+
   // Process offline queue on mount
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -131,6 +134,12 @@ export default function TrackScreen() {
 
         if (!isMounted) return;
 
+        // Skip update if we're currently mutating (prevents race condition)
+        if (isMutatingRef.current) {
+          console.log('Skipping background update during mutation');
+          return;
+        }
+
         // Update cache (writes to both L1 and L2)
         setCached(cacheKey, freshEntries);
         setCached(CACHE_KEYS.settings, freshSettings);
@@ -166,113 +175,129 @@ export default function TrackScreen() {
   }, [currentDate]);
 
   const handleFoodLogged = async (foodData: Omit<FoodEntry, 'id' | 'entry_date' | 'created_at' | 'user_id'>) => {
-    // Optimistic update with temp ID
-    const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const newEntry: FoodEntry = {
-      ...foodData,
-      id: tempId,
-      entry_date: currentDate,
-      created_at: new Date().toISOString(),
-      user_id: settings.user_id,
-    };
-
-    // Update UI immediately
-    const optimisticEntries = [...entries, newEntry];
-    setEntries(optimisticEntries);
-
-    const cacheKey = CACHE_KEYS.entries(currentDate);
-    setCached(cacheKey, optimisticEntries);
-
-    // Check if online
-    const isOnline = checkOnlineStatus();
-
-    if (!isOnline) {
-      await queueOperation({
-        type: 'add_entry',
-        date: currentDate,
-        data: foodData,
-      });
-      setError('Offline: Entry saved and will sync when online.');
-      setTimeout(() => setError(''), 3000);
-      return;
-    }
+    // Start mutation - prevent background updates
+    isMutatingRef.current = true;
 
     try {
-      // Make API call using abstraction
-      await db.food.add(currentDate, foodData);
+      // Optimistic update with temp ID
+      const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const newEntry: FoodEntry = {
+        ...foodData,
+        id: tempId,
+        entry_date: currentDate,
+        created_at: new Date().toISOString(),
+        user_id: settings.user_id,
+      };
 
-      // Reload fresh data and update cache
-      const updatedEntries = await db.food.getByDate(currentDate);
-      setEntries(updatedEntries);
-      setCached(cacheKey, updatedEntries);
-      setDataVersion((prev) => prev + 1);
+      // Update UI immediately
+      const optimisticEntries = [...entries, newEntry];
+      setEntries(optimisticEntries);
 
-    } catch (err) {
-      console.error('Error adding entry:', err);
+      const cacheKey = CACHE_KEYS.entries(currentDate);
+      setCached(cacheKey, optimisticEntries);
 
-      if (!checkOnlineStatus()) {
+      // Check if online
+      const isOnline = checkOnlineStatus();
+
+      if (!isOnline) {
         await queueOperation({
           type: 'add_entry',
           date: currentDate,
           data: foodData,
         });
-        setError('Connection lost: Entry saved and will sync when online.');
-      } else {
-        setError('Failed to add entry. Please try again.');
-        setEntries(entries);
-        setCached(cacheKey, entries);
+        setError('Offline: Entry saved and will sync when online.');
+        setTimeout(() => setError(''), 3000);
+        return;
       }
+
+      try {
+        // Make API call using abstraction
+        await db.food.add(currentDate, foodData);
+
+        // Reload fresh data and update cache
+        const updatedEntries = await db.food.getByDate(currentDate);
+        setEntries(updatedEntries);
+        setCached(cacheKey, updatedEntries);
+        setDataVersion((prev) => prev + 1);
+
+      } catch (err) {
+        console.error('Error adding entry:', err);
+
+        if (!checkOnlineStatus()) {
+          await queueOperation({
+            type: 'add_entry',
+            date: currentDate,
+            data: foodData,
+          });
+          setError('Connection lost: Entry saved and will sync when online.');
+        } else {
+          setError('Failed to add entry. Please try again.');
+          setEntries(entries);
+          setCached(cacheKey, entries);
+        }
+      }
+    } finally {
+      // End mutation - allow background updates again
+      isMutatingRef.current = false;
     }
   };
 
   const handleDeleteEntry = async (entryId: string) => {
-    const originalEntries = entries;
-
-    // Optimistic update
-    const optimisticEntries = entries.filter((entry) => entry.id !== entryId);
-    setEntries(optimisticEntries);
-
-    const cacheKey = CACHE_KEYS.entries(currentDate);
-    setCached(cacheKey, optimisticEntries);
-
-    const isOnline = checkOnlineStatus();
-
-    if (!isOnline) {
-      await queueOperation({
-        type: 'delete_entry',
-        date: currentDate,
-        entryId,
-      });
-      setError('Offline: Entry deleted and will sync when online.');
-      setTimeout(() => setError(''), 3000);
-      return;
-    }
+    // Start mutation - prevent background updates
+    isMutatingRef.current = true;
 
     try {
-      // Use database abstraction
-      await db.food.delete(entryId);
+      const originalEntries = entries;
 
-      // Reload fresh data and update cache
-      const updatedEntries = await db.food.getByDate(currentDate);
-      setEntries(updatedEntries);
-      setCached(cacheKey, updatedEntries);
-      setDataVersion((prev) => prev + 1);
+      // Optimistic update
+      const optimisticEntries = entries.filter((entry) => entry.id !== entryId);
+      setEntries(optimisticEntries);
 
-    } catch (err) {
-      console.error('Error deleting entry:', err);
+      const cacheKey = CACHE_KEYS.entries(currentDate);
+      setCached(cacheKey, optimisticEntries);
 
-      if (!checkOnlineStatus()) {
+      const isOnline = checkOnlineStatus();
+
+      if (!isOnline) {
         await queueOperation({
           type: 'delete_entry',
           date: currentDate,
           entryId,
         });
-        setError('Connection lost: Entry deleted and will sync when online.');
-      } else {
-        setError('Failed to delete entry. Please try again.');
-        setEntries(originalEntries);
-        setCached(cacheKey, originalEntries);
+        setError('Offline: Entry deleted and will sync when online.');
+        setTimeout(() => setError(''), 3000);
+        return;
       }
+
+      try {
+        // Use database abstraction
+        await db.food.delete(entryId);
+
+        // Reload fresh data and update cache
+        const updatedEntries = await db.food.getByDate(currentDate);
+        setEntries(updatedEntries);
+        setCached(cacheKey, updatedEntries);
+        setDataVersion((prev) => prev + 1);
+
+      } catch (err) {
+        console.error('Error deleting entry:', err);
+
+        if (!checkOnlineStatus()) {
+          await queueOperation({
+            type: 'delete_entry',
+            date: currentDate,
+            entryId,
+          });
+          setError('Connection lost: Entry deleted and will sync when online.');
+        } else {
+          setError('Failed to delete entry. Please try again.');
+          setEntries(originalEntries);
+          setCached(cacheKey, originalEntries);
+        }
+      }
+    } finally {
+      // End mutation - allow background updates again
+      isMutatingRef.current = false;
     }
   };
 
