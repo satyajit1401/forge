@@ -3,8 +3,8 @@
  * Implements caching strategies for offline support with proper error handling
  */
 
-const CACHE_NAME = 'forge-cache-v2';
-const RUNTIME_CACHE = 'forge-runtime-v2';
+const CACHE_NAME = 'forge-cache-v3';
+const RUNTIME_CACHE = 'forge-runtime-v3';
 const OFFLINE_URL = '/offline.html';
 
 // Files to cache immediately on install
@@ -98,8 +98,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Strategy: StaleWhileRevalidate for Supabase API (fast response, background update)
-  // BUT: Skip caching for mutations (POST/PUT/DELETE/PATCH) to avoid stale data
+  // Strategy: Different strategies for different Supabase endpoints
   if (url.hostname.includes('supabase.co')) {
     // For mutations, always go to network (no caching)
     if (request.method === 'POST' || request.method === 'PUT' ||
@@ -108,7 +107,35 @@ self.addEventListener('fetch', (event) => {
       return;
     }
 
-    // For reads (GET), use StaleWhileRevalidate
+    // For food_entries GET requests: Use NetworkFirst (always fetch fresh data)
+    // This prevents stale cache from overwriting optimistic updates
+    if (url.pathname.includes('/food_entries')) {
+      event.respondWith(
+        fetch(request)
+          .then((response) => {
+            // Clone BEFORE consuming the response
+            const responseToCache = response.clone();
+
+            // Cache successful responses for offline fallback
+            if (response.ok) {
+              caches.open(RUNTIME_CACHE).then((cache) => {
+                cache.put(request, responseToCache);
+                cleanupCache(RUNTIME_CACHE, 100);
+              });
+            }
+            return response;
+          })
+          .catch(() => {
+            // Only if network fails, use cached data
+            return caches.match(request).then((cachedResponse) => {
+              return cachedResponse || caches.match(OFFLINE_URL);
+            });
+          })
+      );
+      return;
+    }
+
+    // For other Supabase GET requests: Use StaleWhileRevalidate (fast response, background update)
     event.respondWith(
       caches.match(request).then((cachedResponse) => {
         const fetchPromise = fetch(request)
