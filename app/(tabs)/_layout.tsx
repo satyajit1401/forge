@@ -134,6 +134,7 @@ export default function TabLayout() {
           title: 'Feedback',
           tabBarIcon: ({ color }) => <FeedbackIcon color={color} />,
           headerRight: getHeaderRight,
+          href: null, // Hidden for all users
         }}
       />
       {/* Admin-only Analytics Tab */}
@@ -142,8 +143,8 @@ export default function TabLayout() {
         options={{
           title: 'Analytics',
           tabBarIcon: ({ color }) => <AnalyticsIcon color={color} />,
-          href: isAdmin ? '/analytics' : null,
           headerRight: getHeaderRight,
+          href: isAdmin ? undefined : null,
         }}
       />
     </Tabs>

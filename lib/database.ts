@@ -13,6 +13,7 @@ import type {
   AnalyticsSummary,
   DailyMetrics,
   UserMetric,
+  CoachAnalyticsRow,
 } from '../types';
 
 export const db = {
@@ -311,6 +312,21 @@ export const db = {
   // ============================================
   analytics: {
     /**
+     * Get food entries for any user (admin only - bypasses RLS)
+     */
+    getUserFoodEntries: async (userId: string, startDate: string, endDate: string): Promise<FoodEntry[]> => {
+      const { data, error } = await supabase
+        .rpc('admin_get_user_food_entries', {
+          target_user_id: userId,
+          start_date: startDate,
+          end_date: endDate
+        });
+
+      if (error) throw error;
+      return data || [];
+    },
+
+    /**
      * Get analytics summary - calls 3 separate RPC functions
      */
     getSummary: async (): Promise<AnalyticsSummary> => {
@@ -377,6 +393,19 @@ export const db = {
     },
 
     /**
+     * Toggle user's client flag
+     */
+    toggleClientFlag: async (userId: string, isClient: boolean): Promise<void> => {
+      const { error } = await supabase
+        .rpc('admin_toggle_client_flag', {
+          target_user_id: userId,
+          new_client_value: isClient,
+        });
+
+      if (error) throw error;
+    },
+
+    /**
      * Get daily active users (legacy - kept for compatibility)
      */
     getDailyActiveUsers: async (daysBack: number = 30) => {
@@ -385,6 +414,24 @@ export const db = {
 
       if (error) throw error;
       return data;
+    },
+
+    /**
+     * Get coach analytics - detailed nutrition tracking for all users
+     * @param weekStartDate - Monday date in YYYY-MM-DD format (optional, defaults to current week)
+     */
+    getCoachAnalytics: async (weekStartDate?: string): Promise<CoachAnalyticsRow[]> => {
+      // Pass today's date in local timezone to match dashboard calculations
+      const today = new Date().toISOString().split('T')[0];
+
+      const { data, error } = await supabase
+        .rpc('get_coach_analytics', {
+          week_start_date: weekStartDate || null,
+          today_date: today
+        });
+
+      if (error) throw error;
+      return data || [];
     },
   },
 

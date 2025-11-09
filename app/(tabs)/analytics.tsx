@@ -9,7 +9,9 @@ import { View, Text, useWindowDimensions } from 'react-native';
 import { LineChart } from 'react-native-gifted-charts';
 import { db } from '@/lib/database';
 import { getCached, setCached, CACHE_KEYS } from '@/lib/enhanced-cache';
-import type { AnalyticsSummary, DailyMetrics, UserMetric } from '@/types';
+import { getWeekStart, formatWeekRange } from '@/utils/weekly-stats';
+import { format, addDays } from 'date-fns';
+import type { AnalyticsSummary, DailyMetrics, UserMetric, CoachAnalyticsRow, FoodEntry } from '@/types';
 
 // Cache TTL: 5 minutes (analytics don't need to be real-time)
 const ANALYTICS_CACHE_TTL = 5 * 60 * 1000;
@@ -21,21 +23,86 @@ export default function AnalyticsScreen() {
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
   const [dailyMetrics, setDailyMetrics] = useState<DailyMetrics | null>(null);
   const [userMetrics, setUserMetrics] = useState<UserMetric[]>([]);
+  const [coachAnalytics, setCoachAnalytics] = useState<CoachAnalyticsRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [updatingTier, setUpdatingTier] = useState<string | null>(null);
+  const [updatingClient, setUpdatingClient] = useState<string | null>(null);
+  const [appAnalyticsOpen, setAppAnalyticsOpen] = useState(false);
+  const [userSelectorOpen, setUserSelectorOpen] = useState(true);
+  const [selectedUsers, setSelectedUsers] = useState<Set<string>>(new Set());
+  const [currentPage, setCurrentPage] = useState(1);
+  const USERS_PER_PAGE = 15;
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+
+  // Week selector for coach analytics
+  const getTodayDate = (): string => {
+    const today = new Date();
+    return today.toISOString().split('T')[0];
+  };
+  const [weekStart, setWeekStart] = useState<Date>(() => getWeekStart(new Date(getTodayDate())));
+
+  // Expandable rows state
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [expandedRowsData, setExpandedRowsData] = useState<Map<string, Record<string, FoodEntry[]>>>(new Map());
+  const [expandedRowViewMode, setExpandedRowViewMode] = useState<Map<string, 'table' | 'log'>>(new Map());
+  const [loadingExpanded, setLoadingExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    loadAnalytics();
-  }, []);
+    checkAdminAndLoadAnalytics();
+  }, [weekStart]);
+
+  const checkAdminAndLoadAnalytics = async () => {
+    try {
+      // First check if user is admin
+      const status = await db.rateLimit.getStatus();
+      const userIsAdmin = status.account_type === 'admin';
+      setIsAdmin(userIsAdmin);
+
+      if (!userIsAdmin) {
+        setLoading(false);
+        setError('Access denied: Admin privileges required to view analytics');
+        return;
+      }
+
+      // User is admin, proceed to load analytics
+      await loadAnalytics();
+    } catch (err: any) {
+      console.error('[Analytics] Error checking admin status:', err);
+      setIsAdmin(false);
+      setLoading(false);
+      setError('Access denied: Admin privileges required to view analytics');
+    }
+  };
 
   const loadAnalytics = async (forceRefresh = false) => {
     try {
+      setError(null);
+
+      // Check admin status first (unless already checked)
+      if (isAdmin === null) {
+        const status = await db.rateLimit.getStatus();
+        const userIsAdmin = status.account_type === 'admin';
+        setIsAdmin(userIsAdmin);
+
+        if (!userIsAdmin) {
+          setLoading(false);
+          setError('Access denied: Admin privileges required to view analytics');
+          return;
+        }
+      } else if (isAdmin === false) {
+        setLoading(false);
+        setError('Access denied: Admin privileges required to view analytics');
+        return;
+      }
+
       // PHASE 1: Load from cache - INSTANT (skip if force refresh)
       if (!forceRefresh) {
         const cachedData = getCached<{
           summary: AnalyticsSummary;
           metrics: DailyMetrics;
           users: UserMetric[];
+          coach: CoachAnalyticsRow[];
         }>(CACHE_KEYS.analytics);
 
         if (cachedData) {
@@ -43,7 +110,13 @@ export default function AnalyticsScreen() {
           setSummary(cachedData.summary);
           setDailyMetrics(cachedData.metrics);
           setUserMetrics(cachedData.users);
+          setCoachAnalytics(cachedData.coach);
           setLoading(false);
+
+          // Initialize selected users from cache
+          if (cachedData.coach.length > 0 && selectedUsers.size === 0) {
+            setSelectedUsers(new Set(cachedData.coach.slice(0, 5).map(u => u.user_id)));
+          }
         } else {
           // No cache - show loading spinner
           setLoading(true);
@@ -53,11 +126,76 @@ export default function AnalyticsScreen() {
       }
 
       // PHASE 2: Fetch fresh data (revalidate in background)
-      const [summaryData, metricsData, usersData] = await Promise.all([
-        db.analytics.getSummary(),
-        db.analytics.getDailyMetrics(30),
-        db.analytics.getUserMetrics(),
-      ]);
+      console.log('[Analytics] Fetching fresh data...');
+
+      console.log('[Analytics] Fetching summary...');
+      const summaryData = await db.analytics.getSummary();
+      console.log('[Analytics] Summary fetched');
+
+      console.log('[Analytics] Fetching daily metrics...');
+      const metricsData = await db.analytics.getDailyMetrics(30);
+      console.log('[Analytics] Daily metrics fetched');
+
+      console.log('[Analytics] Fetching user metrics...');
+      const usersData = await db.analytics.getUserMetrics();
+      console.log('[Analytics] User metrics fetched');
+
+      console.log('[Analytics] Fetching coach analytics...');
+      const weekStartStr = format(weekStart, 'yyyy-MM-dd');
+      const rawCoachData = await db.analytics.getCoachAnalytics(weekStartStr);
+      console.log('[Analytics] Coach analytics fetched for week:', weekStartStr);
+
+      // Calculate stats using the SAME LOGIC as dashboard
+      const today = format(new Date(), 'yyyy-MM-dd');
+      const coachData = rawCoachData.map((user) => {
+        // Build daily data array from the 7 day columns
+        const dailyData = [];
+        for (let i = 0; i < 7; i++) {
+          const date = addDays(weekStart, i);
+          const dateStr = format(date, 'yyyy-MM-dd');
+          const dayNum = i + 1;
+          const calories = user[`d${dayNum}_calories` as keyof typeof user] as number;
+          const protein = user[`d${dayNum}_protein` as keyof typeof user] as number;
+
+          dailyData.push({
+            date: dateStr,
+            calories,
+            protein
+          });
+        }
+
+        // MATCH DASHBOARD LOGIC: Calculate averages - EXCLUDE today and days with no food
+        const completedDaysWithFood = dailyData.filter(
+          day => day.date < today && day.calories > 0
+        );
+
+        const avgCaloriesTotal = completedDaysWithFood.reduce((sum, day) => sum + day.calories, 0);
+        const avgProteinTotal = completedDaysWithFood.reduce((sum, day) => sum + day.protein, 0);
+        const avgDaysCount = completedDaysWithFood.length;
+
+        const avgCalories = avgDaysCount > 0 ? Math.round(avgCaloriesTotal / avgDaysCount) : 0;
+        const avgProtein = avgDaysCount > 0 ? Math.round(avgProteinTotal / avgDaysCount) : 0;
+
+        // MATCH DASHBOARD LOGIC: Calculate deficit/surplus from MAINTENANCE
+        const dailyDeficit = avgCalories - user.maintenance_calories;
+        const weeklyDeficit = avgDaysCount > 0 ? dailyDeficit * avgDaysCount : 0;
+
+        // Count total days logged (including today)
+        const daysLogged = dailyData.filter(day => day.calories > 0).length;
+
+        return {
+          ...user,
+          avg_calories: avgCalories,
+          avg_protein: avgProtein,
+          daily_deficit: dailyDeficit,
+          weekly_deficit: weeklyDeficit,
+          days_logged: daysLogged
+        };
+      });
+
+      console.log('[Analytics] Coach data processed with dashboard logic:', coachData[0]);
+
+      console.log('[Analytics] All data fetched successfully');
 
       // Update cache with 5-minute TTL
       setCached(
@@ -66,6 +204,7 @@ export default function AnalyticsScreen() {
           summary: summaryData,
           metrics: metricsData,
           users: usersData,
+          coach: coachData,
         },
         ANALYTICS_CACHE_TTL
       );
@@ -74,8 +213,21 @@ export default function AnalyticsScreen() {
       setSummary(summaryData);
       setDailyMetrics(metricsData);
       setUserMetrics(usersData);
-    } catch (err) {
-      console.error('Error loading analytics:', err);
+      setCoachAnalytics(coachData);
+
+      // Initialize selected users if not already set
+      if (coachData.length > 0 && selectedUsers.size === 0) {
+        setSelectedUsers(new Set(coachData.slice(0, 5).map(u => u.user_id)));
+      }
+    } catch (err: any) {
+      console.error('[Analytics] Error loading analytics:', err);
+      const errorMessage = err?.message || 'Failed to load analytics data';
+      setError(errorMessage);
+
+      // If it's an admin access error, show specific message
+      if (errorMessage.includes('Admin') || errorMessage.includes('admin')) {
+        setError('Access denied: Admin privileges required to view analytics');
+      }
     } finally {
       setLoading(false);
     }
@@ -93,6 +245,142 @@ export default function AnalyticsScreen() {
     } finally {
       setUpdatingTier(null);
     }
+  };
+
+  const handleClientToggle = async (userId: string, currentValue: boolean) => {
+    setUpdatingClient(userId);
+    try {
+      await db.analytics.toggleClientFlag(userId, !currentValue);
+
+      // Reload analytics and update cache
+      await loadAnalytics(true); // Force refresh to clear cache
+    } catch (err) {
+      console.error('Error toggling client flag:', err);
+    } finally {
+      setUpdatingClient(null);
+    }
+  };
+
+  const toggleUserSelection = (userId: string) => {
+    setSelectedUsers(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(userId)) {
+        newSet.delete(userId);
+      } else {
+        newSet.add(userId);
+      }
+      return newSet;
+    });
+  };
+
+  const selectAllUsers = () => {
+    setSelectedUsers(new Set(coachAnalytics.map(u => u.user_id)));
+  };
+
+  const deselectAllUsers = () => {
+    setSelectedUsers(new Set());
+  };
+
+  const navigateWeek = (direction: number) => {
+    const newWeekStart = new Date(weekStart);
+    newWeekStart.setDate(newWeekStart.getDate() + direction * 7);
+
+    // Don't allow navigating to future weeks
+    if (direction > 0) {
+      const currentWeekStart = getWeekStart(new Date(getTodayDate()));
+      if (format(newWeekStart, 'yyyy-MM-dd') > format(currentWeekStart, 'yyyy-MM-dd')) {
+        return;
+      }
+    }
+
+    // Clear expanded rows cache when changing weeks
+    setExpandedRowsData(new Map());
+    setWeekStart(newWeekStart);
+  };
+
+  const goToCurrentWeek = () => {
+    // Clear expanded rows cache when changing weeks
+    setExpandedRowsData(new Map());
+    setWeekStart(getWeekStart(new Date(getTodayDate())));
+  };
+
+  const isCurrentWeek = () => {
+    const currentWeekStart = getWeekStart(new Date(getTodayDate()));
+    return format(weekStart, 'yyyy-MM-dd') === format(currentWeekStart, 'yyyy-MM-dd');
+  };
+
+  const toggleExpand = async (userId: string) => {
+    const newExpanded = new Set(expandedRows);
+
+    if (newExpanded.has(userId)) {
+      // Collapse
+      newExpanded.delete(userId);
+      setExpandedRows(newExpanded);
+    } else {
+      // Expand - load data if not cached
+      newExpanded.add(userId);
+      setExpandedRows(newExpanded);
+
+      if (!expandedRowsData.has(userId)) {
+        await loadWeeklyEntries(userId);
+      }
+    }
+  };
+
+  const loadWeeklyEntries = async (userId: string) => {
+    setLoadingExpanded(prev => new Set(prev).add(userId));
+
+    try {
+      const weekEnd = addDays(weekStart, 6);
+      const startDate = format(weekStart, 'yyyy-MM-dd');
+      const endDate = format(weekEnd, 'yyyy-MM-dd');
+
+      console.log('[Analytics] Loading weekly entries for user:', userId, 'from', startDate, 'to', endDate);
+
+      // Use admin function to fetch entries for any user
+      const userEntries = await db.analytics.getUserFoodEntries(userId, startDate, endDate);
+      console.log('[Analytics] Fetched entries count:', userEntries.length, 'for user:', userId);
+      const groupedByDate: Record<string, FoodEntry[]> = {};
+
+      // Initialize all 7 days with empty arrays
+      for (let i = 0; i < 7; i++) {
+        const date = addDays(weekStart, i);
+        const dateStr = format(date, 'yyyy-MM-dd');
+        groupedByDate[dateStr] = [];
+      }
+
+      // Fill in the actual entries
+      userEntries.forEach(entry => {
+        if (!groupedByDate[entry.entry_date]) {
+          groupedByDate[entry.entry_date] = [];
+        }
+        groupedByDate[entry.entry_date].push(entry);
+      });
+
+      console.log('[Analytics] Loaded entries for user:', userId, 'total entries:', userEntries.length);
+      console.log('[Analytics] Grouped data:', groupedByDate);
+
+      // Update cache
+      setExpandedRowsData(prev => new Map(prev).set(userId, groupedByDate));
+
+      // Initialize view mode if not set
+      if (!expandedRowViewMode.has(userId)) {
+        setExpandedRowViewMode(prev => new Map(prev).set(userId, 'table'));
+      }
+    } catch (err) {
+      console.error('[Analytics] Error loading weekly entries:', err);
+      console.error('[Analytics] Full error:', err);
+    } finally {
+      setLoadingExpanded(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(userId);
+        return newSet;
+      });
+    }
+  };
+
+  const updateViewMode = (userId: string, mode: 'table' | 'log') => {
+    setExpandedRowViewMode(prev => new Map(prev).set(userId, mode));
   };
 
   const formatDate = (dateString: string) => {
@@ -122,6 +410,79 @@ export default function AnalyticsScreen() {
     }
   };
 
+  // Helper function to get color coding for daily calories
+  // Green if within ±2.5% of target, yellow if within ±7.5%, else red
+  const getCaloriesColor = (calories: number, target: number) => {
+    if (calories === 0) return 'bg-gray-100 text-gray-500';
+
+    const diff = Math.abs(calories - target);
+    const percentDiff = (diff / target) * 100;
+
+    if (percentDiff <= 2.5) return 'bg-green-100 text-green-700';
+    if (percentDiff <= 7.5) return 'bg-yellow-100 text-yellow-700';
+    return 'bg-red-100 text-red-700';
+  };
+
+  // Helper function to get color coding for daily protein
+  // Green if at or above target, yellow if within 7.5% below, red if more than 7.5% below
+  const getProteinColor = (protein: number, target: number) => {
+    if (protein === 0) return 'bg-gray-100 text-gray-500';
+
+    if (protein >= target) return 'bg-green-100 text-green-700';
+
+    const percentBelow = ((target - protein) / target) * 100;
+
+    if (percentBelow <= 7.5) return 'bg-yellow-100 text-yellow-700';
+    return 'bg-red-100 text-red-700';
+  };
+
+  // Calculate deficit/surplus status and color
+  const getDeficitDisplay = (dailyDeficit: number, targetCal: number, maintenance: number) => {
+    const isCutting = targetCal < maintenance;
+    const isBulking = targetCal > maintenance;
+    const isDeficit = dailyDeficit < 0;
+    const isSurplus = dailyDeficit > 0;
+
+    let color = 'text-gray-700';
+    let label = 'Maintenance';
+
+    if (isDeficit) {
+      // In deficit
+      label = `${Math.abs(dailyDeficit)} cal deficit`;
+      color = (isCutting) ? 'text-green-700' : 'text-red-700';
+    } else if (isSurplus) {
+      // In surplus
+      label = `${Math.abs(dailyDeficit)} cal surplus`;
+      color = (isBulking) ? 'text-green-700' : 'text-red-700';
+    }
+
+    return { label, color };
+  };
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-50 p-12">
+        <div className="max-w-md bg-white rounded-xl border border-red-200 p-6 shadow-sm">
+          <div className="flex items-start gap-3">
+            <svg className="w-6 h-6 text-red-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div className="flex-1">
+              <h3 className="text-sm font-bold text-gray-900 mb-1">Error Loading Analytics</h3>
+              <p className="text-sm text-gray-700 mb-4">{error}</p>
+              <button
+                onClick={() => loadAnalytics(true)}
+                className="px-4 py-2 bg-black text-white rounded-lg text-sm font-medium hover:bg-gray-800 transition-all"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (loading || !summary || !dailyMetrics) {
     return (
       <div className="flex items-center justify-center h-screen bg-gray-50 p-12">
@@ -135,6 +496,15 @@ export default function AnalyticsScreen() {
       </div>
     );
   }
+
+  const filteredCoachAnalytics = coachAnalytics.filter(user => selectedUsers.has(user.user_id));
+
+  // Pagination for user metrics
+  const totalPages = Math.ceil(userMetrics.length / USERS_PER_PAGE);
+  const paginatedUserMetrics = userMetrics.slice(
+    (currentPage - 1) * USERS_PER_PAGE,
+    currentPage * USERS_PER_PAGE
+  );
 
   return (
     <div className="h-screen overflow-y-auto bg-gray-50 p-3 md:p-4">
@@ -153,187 +523,613 @@ export default function AnalyticsScreen() {
           </button>
         </div>
 
-        {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-          {/* Total Users */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-                <span className="text-xl">👥</span>
-              </div>
-              <div>
-                <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Total Users</p>
-                <p className="text-2xl font-bold text-gray-900">{summary.totalUsers}</p>
-              </div>
+        {/* SECTION 1: App Analytics (Collapsible) */}
+        <div className="mb-8">
+          <button
+            onClick={() => setAppAnalyticsOpen(!appAnalyticsOpen)}
+            className="w-full bg-white rounded-xl border border-gray-200 p-4 shadow-sm hover:bg-gray-50 transition-all flex items-center justify-between"
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-bold text-gray-900">App Analytics</span>
+              <span className="text-xs text-gray-500">System metrics and user management</span>
             </div>
-          </div>
+            <svg
+              className={`w-5 h-5 text-gray-600 transition-transform ${appAnalyticsOpen ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
 
-          {/* Total Food Logs */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-                <span className="text-xl">📋</span>
-              </div>
-              <div>
-                <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Total Food Logs</p>
-                <p className="text-2xl font-bold text-gray-900">{summary.totalFoodLogs}</p>
-              </div>
-            </div>
-          </div>
+          {appAnalyticsOpen && (
+            <div className="mt-4 space-y-4">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Total Users */}
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+                      <span className="text-xl">👥</span>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Total Users</p>
+                      <p className="text-2xl font-bold text-gray-900">{summary.totalUsers}</p>
+                    </div>
+                  </div>
+                </div>
 
-          {/* Total Coach Calls */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-                <span className="text-xl">💬</span>
+                {/* Total Food Logs */}
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
+                      <span className="text-xl">📋</span>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Total Food Logs</p>
+                      <p className="text-2xl font-bold text-gray-900">{summary.totalFoodLogs}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Total Coach Calls */}
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+                      <span className="text-xl">💬</span>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Total Coach Calls</p>
+                      <p className="text-2xl font-bold text-gray-900">{summary.totalCoachCalls}</p>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div>
-                <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Total Coach Calls</p>
-                <p className="text-2xl font-bold text-gray-900">{summary.totalCoachCalls}</p>
+
+              {/* Analytics Charts */}
+              <div className="space-y-4">
+                {/* Daily Active Users */}
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <h3 className="text-sm font-bold text-gray-900 mb-4">Daily Active Users (Last 30 Days)</h3>
+                  <View style={{ alignItems: 'center' }}>
+                    <LineChart
+                      data={dailyMetrics.dailyActiveUsers.map(item => ({
+                        value: item.user_count,
+                        label: formatDate(item.date)
+                      }))}
+                      width={chartWidth}
+                      height={200}
+                      color="#3b82f6"
+                      thickness={2}
+                      startFillColor="rgba(59, 130, 246, 0.3)"
+                      endFillColor="rgba(59, 130, 246, 0.01)"
+                      startOpacity={0.9}
+                      endOpacity={0.2}
+                      spacing={30}
+                      noOfSections={5}
+                      yAxisColor="#E5E7EB"
+                      xAxisColor="#E5E7EB"
+                      yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
+                      xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
+                      hideRules
+                      isAnimated
+                      animationDuration={300}
+                    />
+                  </View>
+                </div>
+
+                {/* Daily Food Logs */}
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <h3 className="text-sm font-bold text-gray-900 mb-4">Daily Food Logs (Last 30 Days)</h3>
+                  <View style={{ alignItems: 'center' }}>
+                    <LineChart
+                      data={dailyMetrics.dailyFoodLogs.map(item => ({
+                        value: item.log_count,
+                        label: formatDate(item.date)
+                      }))}
+                      width={chartWidth}
+                      height={200}
+                      color="#10b981"
+                      thickness={2}
+                      startFillColor="rgba(16, 185, 129, 0.3)"
+                      endFillColor="rgba(16, 185, 129, 0.01)"
+                      startOpacity={0.9}
+                      endOpacity={0.2}
+                      spacing={30}
+                      noOfSections={5}
+                      yAxisColor="#E5E7EB"
+                      xAxisColor="#E5E7EB"
+                      yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
+                      xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
+                      hideRules
+                      isAnimated
+                      animationDuration={300}
+                    />
+                  </View>
+                </div>
+
+                {/* Daily Coach Calls */}
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <h3 className="text-sm font-bold text-gray-900 mb-4">Daily Coach Calls (Last 30 Days)</h3>
+                  <View style={{ alignItems: 'center' }}>
+                    <LineChart
+                      data={dailyMetrics.dailyCoachCalls.map(item => ({
+                        value: item.call_count,
+                        label: formatDate(item.date)
+                      }))}
+                      width={chartWidth}
+                      height={200}
+                      color="#8b5cf6"
+                      thickness={2}
+                      startFillColor="rgba(139, 92, 246, 0.3)"
+                      endFillColor="rgba(139, 92, 246, 0.01)"
+                      startOpacity={0.9}
+                      endOpacity={0.2}
+                      spacing={30}
+                      noOfSections={5}
+                      yAxisColor="#E5E7EB"
+                      xAxisColor="#E5E7EB"
+                      yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
+                      xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
+                      hideRules
+                      isAnimated
+                      animationDuration={300}
+                    />
+                  </View>
+                </div>
+              </div>
+
+              {/* User Metrics Table */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="p-6 border-b border-gray-200">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-sm font-bold text-gray-900">User Activity</h2>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Showing {userMetrics.length > 0 ? (currentPage - 1) * USERS_PER_PAGE + 1 : 0}-{Math.min(currentPage * USERS_PER_PAGE, userMetrics.length)} of {userMetrics.length} users
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {userMetrics.length === 0 ? (
+                  <div className="p-12 text-center">
+                    <p className="text-sm text-gray-500">No users yet</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="overflow-x-auto">
+                      <table className="w-full">
+                        <thead>
+                          <tr className="bg-gray-50 border-b border-gray-200">
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Email</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">User #</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Tier</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Client</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Food Logs</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Coach Calls</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Last Active</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {paginatedUserMetrics.map((user) => (
+                            <tr key={user.user_id} className="border-b border-gray-200 hover:bg-gray-50 transition-colors">
+                              <td className="px-6 py-4 text-sm text-gray-900">{user.email}</td>
+                              <td className="px-6 py-4 text-sm text-gray-700">#{user.user_rank}</td>
+                              <td className="px-6 py-4">
+                                <select
+                                  value={user.account_type}
+                                  onChange={(e) => handleTierChange(user.user_id, e.target.value as 'basic' | 'pro' | 'admin')}
+                                  disabled={updatingTier === user.user_id}
+                                  className={`px-2.5 py-1.5 border rounded-lg text-xs font-semibold uppercase cursor-pointer hover:opacity-80 transition-all ${getTierColor(user.account_type)} ${updatingTier === user.user_id ? 'opacity-50 cursor-wait' : ''}`}
+                                >
+                                  <option value="basic">Basic</option>
+                                  <option value="pro">Pro</option>
+                                  <option value="admin">Admin</option>
+                                </select>
+                              </td>
+                              <td className="px-6 py-4">
+                                <button
+                                  onClick={() => handleClientToggle(user.user_id, user.client)}
+                                  disabled={updatingClient === user.user_id}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                                    user.client
+                                      ? 'bg-green-100 text-green-700 border border-green-200 hover:bg-green-200'
+                                      : 'bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200'
+                                  } ${updatingClient === user.user_id ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
+                                >
+                                  {updatingClient === user.user_id ? '...' : user.client ? 'YES' : 'NO'}
+                                </button>
+                              </td>
+                              <td className="px-6 py-4 text-sm text-gray-700">{user.food_logs_count}</td>
+                              <td className="px-6 py-4 text-sm text-gray-700">{user.coach_calls_count}</td>
+                              <td className="px-6 py-4 text-sm text-gray-500">{formatDateTime(user.last_active)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Pagination Controls */}
+                    {totalPages > 1 && (
+                      <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+                        <button
+                          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                          disabled={currentPage === 1}
+                          className={`px-4 py-2 border rounded-lg text-sm font-medium transition-all ${
+                            currentPage === 1
+                              ? 'border-gray-200 text-gray-400 cursor-not-allowed'
+                              : 'border-gray-300 text-gray-900 bg-white hover:bg-gray-50'
+                          }`}
+                        >
+                          Previous
+                        </button>
+                        <span className="text-sm text-gray-700">
+                          Page {currentPage} of {totalPages}
+                        </span>
+                        <button
+                          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                          disabled={currentPage === totalPages}
+                          className={`px-4 py-2 border rounded-lg text-sm font-medium transition-all ${
+                            currentPage === totalPages
+                              ? 'border-gray-200 text-gray-400 cursor-not-allowed'
+                              : 'border-gray-300 text-gray-900 bg-white hover:bg-gray-50'
+                          }`}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* Analytics Charts */}
-        <div className="space-y-4">
-          {/* Daily Active Users */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-            <h3 className="text-sm font-bold text-gray-900 mb-4">Daily Active Users (Last 30 Days)</h3>
-            <View style={{ alignItems: 'center' }}>
-              <LineChart
-                data={dailyMetrics.dailyActiveUsers.map(item => ({
-                  value: item.user_count,
-                  label: formatDate(item.date)
-                }))}
-                width={chartWidth}
-                height={200}
-                color="#3b82f6"
-                thickness={2}
-                startFillColor="rgba(59, 130, 246, 0.3)"
-                endFillColor="rgba(59, 130, 246, 0.01)"
-                startOpacity={0.9}
-                endOpacity={0.2}
-                spacing={30}
-                noOfSections={5}
-                yAxisColor="#E5E7EB"
-                xAxisColor="#E5E7EB"
-                yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
-                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
-                hideRules
-                isAnimated
-                animationDuration={300}
-              />
-            </View>
-          </div>
-
-          {/* Daily Food Logs */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-            <h3 className="text-sm font-bold text-gray-900 mb-4">Daily Food Logs (Last 30 Days)</h3>
-            <View style={{ alignItems: 'center' }}>
-              <LineChart
-                data={dailyMetrics.dailyFoodLogs.map(item => ({
-                  value: item.log_count,
-                  label: formatDate(item.date)
-                }))}
-                width={chartWidth}
-                height={200}
-                color="#10b981"
-                thickness={2}
-                startFillColor="rgba(16, 185, 129, 0.3)"
-                endFillColor="rgba(16, 185, 129, 0.01)"
-                startOpacity={0.9}
-                endOpacity={0.2}
-                spacing={30}
-                noOfSections={5}
-                yAxisColor="#E5E7EB"
-                xAxisColor="#E5E7EB"
-                yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
-                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
-                hideRules
-                isAnimated
-                animationDuration={300}
-              />
-            </View>
-          </div>
-
-          {/* Daily Coach Calls */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-            <h3 className="text-sm font-bold text-gray-900 mb-4">Daily Coach Calls (Last 30 Days)</h3>
-            <View style={{ alignItems: 'center' }}>
-              <LineChart
-                data={dailyMetrics.dailyCoachCalls.map(item => ({
-                  value: item.call_count,
-                  label: formatDate(item.date)
-                }))}
-                width={chartWidth}
-                height={200}
-                color="#8b5cf6"
-                thickness={2}
-                startFillColor="rgba(139, 92, 246, 0.3)"
-                endFillColor="rgba(139, 92, 246, 0.01)"
-                startOpacity={0.9}
-                endOpacity={0.2}
-                spacing={30}
-                noOfSections={5}
-                yAxisColor="#E5E7EB"
-                xAxisColor="#E5E7EB"
-                yAxisTextStyle={{ color: '#6B7280', fontSize: 12 }}
-                xAxisLabelTextStyle={{ color: '#6B7280', fontSize: 10, width: 70, textAlign: 'center' }}
-                hideRules
-                isAnimated
-                animationDuration={300}
-              />
-            </View>
-          </div>
-        </div>
-
-        {/* User Metrics Table */}
+        {/* SECTION 2: Coach Analytics (Main Section) */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="p-6 border-b border-gray-200">
-            <h2 className="text-sm font-bold text-gray-900">User Activity</h2>
-            <p className="text-xs text-gray-500 mt-0.5">Sorted by total activity</p>
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-sm font-bold text-gray-900">Coach Analytics</h2>
+                <p className="text-xs text-gray-500 mt-0.5">Detailed nutrition tracking by week</p>
+              </div>
+            </div>
+
+            {/* Week Selector */}
+            <div className="mb-4 bg-gray-50 rounded-lg border border-gray-200 p-3">
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => navigateWeek(-1)}
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-all"
+                  title="Previous week"
+                >
+                  <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+
+                <div className="text-center">
+                  <h3 className="text-sm font-bold text-gray-900">
+                    {formatWeekRange(weekStart)}
+                  </h3>
+                  {!isCurrentWeek() && (
+                    <button
+                      onClick={goToCurrentWeek}
+                      className="mt-1 px-3 py-1 bg-black text-white text-xs font-medium rounded-lg hover:bg-gray-800 transition-all"
+                    >
+                      Current Week
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => navigateWeek(1)}
+                  disabled={isCurrentWeek()}
+                  className={`p-2 rounded-lg transition-all ${
+                    isCurrentWeek()
+                      ? 'opacity-30 cursor-not-allowed'
+                      : 'hover:bg-gray-100'
+                  }`}
+                  title="Next week"
+                >
+                  <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* User Selector (Collapsible) */}
+            <div className="mb-4">
+              <button
+                onClick={() => setUserSelectorOpen(!userSelectorOpen)}
+                className="w-full bg-gray-50 rounded-lg border border-gray-200 p-3 hover:bg-gray-100 transition-all flex items-center justify-between"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-gray-900">User Selection</span>
+                  <span className="text-xs text-gray-500">
+                    ({selectedUsers.size} of {coachAnalytics.length} selected)
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!userSelectorOpen && (
+                    <>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectAllUsers();
+                        }}
+                        className="px-2 py-1 border border-gray-300 bg-white rounded text-xs font-medium text-gray-900 hover:bg-gray-50 transition-all"
+                      >
+                        Select All
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deselectAllUsers();
+                        }}
+                        className="px-2 py-1 border border-gray-300 bg-white rounded text-xs font-medium text-gray-900 hover:bg-gray-50 transition-all"
+                      >
+                        Clear
+                      </button>
+                    </>
+                  )}
+                  <svg
+                    className={`w-4 h-4 text-gray-600 transition-transform ${userSelectorOpen ? 'rotate-180' : ''}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </div>
+              </button>
+
+              {userSelectorOpen && (
+                <div className="mt-3 space-y-3">
+                  <div className="flex gap-2">
+                    <button
+                      onClick={selectAllUsers}
+                      className="px-3 py-1.5 border border-gray-200 bg-white rounded-lg text-xs font-medium text-gray-900 hover:bg-gray-50 transition-all"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={deselectAllUsers}
+                      className="px-3 py-1.5 border border-gray-200 bg-white rounded-lg text-xs font-medium text-gray-900 hover:bg-gray-50 transition-all"
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {coachAnalytics.map(user => (
+                      <button
+                        key={user.user_id}
+                        onClick={() => toggleUserSelection(user.user_id)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          selectedUsers.has(user.user_id)
+                            ? 'bg-black text-white'
+                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        {user.email}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
-          {userMetrics.length === 0 ? (
+          {/* Coach Analytics Table */}
+          {filteredCoachAnalytics.length === 0 ? (
             <div className="p-12 text-center">
-              <p className="text-sm text-gray-500">No users yet</p>
+              <p className="text-sm text-gray-500">No users selected</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Email</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">User #</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Tier</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Food Logs</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Coach Calls</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Last Active</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider sticky left-0 bg-gray-50 z-10">Email</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Target</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Weekly Avg</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Daily Avg +-</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Weekly Total</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Mon</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Tue</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Wed</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Thu</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Fri</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Sat</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Sun</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {userMetrics.map((user) => (
-                    <tr key={user.user_id} className="border-b border-gray-200 hover:bg-gray-50 transition-colors">
-                      <td className="px-6 py-4 text-sm text-gray-900">{user.email}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">#{user.user_rank}</td>
-                      <td className="px-6 py-4">
-                        <select
-                          value={user.account_type}
-                          onChange={(e) => handleTierChange(user.user_id, e.target.value as 'basic' | 'pro' | 'admin')}
-                          disabled={updatingTier === user.user_id}
-                          className={`px-2.5 py-1.5 border rounded-lg text-xs font-semibold uppercase cursor-pointer hover:opacity-80 transition-all ${getTierColor(user.account_type)} ${updatingTier === user.user_id ? 'opacity-50 cursor-wait' : ''}`}
-                        >
-                          <option value="basic">Basic</option>
-                          <option value="pro">Pro</option>
-                          <option value="admin">Admin</option>
-                        </select>
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{user.food_logs_count}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{user.coach_calls_count}</td>
-                      <td className="px-6 py-4 text-sm text-gray-500">{formatDateTime(user.last_active)}</td>
-                    </tr>
-                  ))}
+                  {filteredCoachAnalytics.map((user) => {
+                    const deficitDisplay = getDeficitDisplay(user.daily_deficit, user.target_calories, user.maintenance_calories);
+                    const weeklyDeficitDisplay = getDeficitDisplay(user.weekly_deficit, user.target_calories, user.maintenance_calories);
+                    const isExpanded = expandedRows.has(user.user_id);
+                    const isLoading = loadingExpanded.has(user.user_id);
+
+                    return (
+                      <React.Fragment key={user.user_id}>
+                        {/* Main Row */}
+                        <tr className="border-b border-gray-200 hover:bg-gray-50 transition-colors">
+                          <td className="px-4 py-4 text-sm text-gray-900 font-medium sticky left-0 bg-white z-10">
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => toggleExpand(user.user_id)}
+                                className="p-1 hover:bg-gray-100 rounded transition-all"
+                                title={isExpanded ? 'Collapse' : 'Expand'}
+                              >
+                                <svg className={`w-4 h-4 text-gray-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                </svg>
+                              </button>
+                              <span>{user.email}</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-4 text-xs text-gray-700">
+                          <div className="text-gray-500 mb-1">Maint: {user.maintenance_calories} cal</div>
+                          <div>{user.target_calories} cal</div>
+                          <div>{user.target_protein}g pro</div>
+                        </td>
+                        <td className="px-4 py-4 text-xs text-gray-700">
+                          <div>{user.avg_calories} cal</div>
+                          <div>{user.avg_protein}g pro</div>
+                        </td>
+                        <td className="px-4 py-4 text-xs">
+                          <div className={`font-semibold ${deficitDisplay.color}`}>{deficitDisplay.label}</div>
+                        </td>
+                        <td className="px-4 py-4 text-xs">
+                          <div className={`font-semibold ${weeklyDeficitDisplay.color}`}>{Math.abs(user.weekly_deficit)} cal</div>
+                          <div className="text-gray-400 text-xs mt-1">({user.days_logged} days)</div>
+                        </td>
+                        {/* Day 1-7 */}
+                        {[
+                          [user.d1_calories, user.d1_protein],
+                          [user.d2_calories, user.d2_protein],
+                          [user.d3_calories, user.d3_protein],
+                          [user.d4_calories, user.d4_protein],
+                          [user.d5_calories, user.d5_protein],
+                          [user.d6_calories, user.d6_protein],
+                          [user.d7_calories, user.d7_protein],
+                        ].map(([cal, pro], idx) => {
+                          const calColor = getCaloriesColor(cal, user.target_calories);
+                          const proColor = getProteinColor(Number(pro), user.target_protein);
+
+                          return (
+                            <td key={idx} className="px-2 py-4">
+                              {cal === 0 ? (
+                                <div className="text-center text-xs text-gray-400">-</div>
+                              ) : (
+                                <div className="space-y-1">
+                                  <div className={`px-2 py-1 rounded text-xs font-bold text-center ${calColor}`}>
+                                    {cal}
+                                  </div>
+                                  <div className={`px-2 py-1 rounded text-xs font-bold text-center ${proColor}`}>
+                                    {Number(pro).toFixed(0)}g
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          );
+                        })}
+                        </tr>
+
+                        {/* Expanded Row */}
+                        {isExpanded && (
+                          <tr>
+                            <td colSpan={13} className="px-4 py-6 bg-white border-t border-gray-100">
+                              {isLoading ? (
+                                <div className="flex items-center justify-center py-8">
+                                  <div className="flex items-center gap-3">
+                                    <svg className="animate-spin h-5 w-5 text-gray-900" viewBox="0 0 24 24">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                    </svg>
+                                    <span className="text-gray-900 font-medium text-sm">Loading...</span>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div>
+                                  {/* View Toggle */}
+                                  <div className="flex justify-end mb-4">
+                                    <div className="inline-flex rounded-lg border border-gray-200 bg-white p-0.5">
+                                      <button
+                                        onClick={() => updateViewMode(user.user_id, 'table')}
+                                        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                                          (expandedRowViewMode.get(user.user_id) || 'table') === 'table'
+                                            ? 'bg-black text-white'
+                                            : 'text-gray-600 hover:text-gray-900'
+                                        }`}
+                                      >
+                                        Table
+                                      </button>
+                                      <button
+                                        onClick={() => updateViewMode(user.user_id, 'log')}
+                                        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                                          (expandedRowViewMode.get(user.user_id) || 'table') === 'log'
+                                            ? 'bg-black text-white'
+                                            : 'text-gray-600 hover:text-gray-900'
+                                        }`}
+                                      >
+                                        Log
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  <div className="overflow-x-auto">
+                                    <div className="flex gap-6 min-w-max">
+                                    {/* Render each day */}
+                                    {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((dayName, idx) => {
+                                      const date = addDays(weekStart, idx);
+                                      const dateStr = format(date, 'yyyy-MM-dd');
+                                      const entries = expandedRowsData.get(user.user_id)?.[dateStr] || [];
+                                      const viewMode = expandedRowViewMode.get(user.user_id) || 'table';
+
+                                      // Calculate totals for this day
+                                      const totalCal = entries.reduce((sum, e) => sum + e.calories, 0);
+                                      const totalPro = entries.reduce((sum, e) => sum + e.protein, 0);
+
+                                      const calColor = getCaloriesColor(totalCal, user.target_calories);
+                                      const proColor = getProteinColor(totalPro, user.target_protein);
+
+                                      return (
+                                        <div key={dateStr} className="flex-shrink-0 w-52">
+                                          {/* Day Header with totals */}
+                                          <div className="mb-2">
+                                            <div className="text-xs font-bold text-gray-900">{dayName} {format(date, 'M/d')}</div>
+                                            {totalCal === 0 ? (
+                                              <div className="text-xs text-gray-400 mt-1">-</div>
+                                            ) : (
+                                              <div className="flex gap-2 mt-1">
+                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${calColor}`}>
+                                                  {totalCal}
+                                                </span>
+                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${proColor}`}>
+                                                  {totalPro.toFixed(0)}g
+                                                </span>
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          {/* Food entries */}
+                                          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                                            {viewMode === 'table' ? (
+                                              // Table view - compact with macros
+                                              entries.map((entry) => (
+                                                <div key={entry.id} className="text-xs">
+                                                  <div className="font-medium text-gray-700">{entry.name}</div>
+                                                  <div className="text-gray-500">{entry.calories}c • {entry.protein.toFixed(0)}p</div>
+                                                </div>
+                                              ))
+                                            ) : (
+                                              // Log view - simple list with macros inline
+                                              entries.map((entry) => (
+                                                <div key={entry.id} className="text-xs text-gray-700">
+                                                  {entry.name} <span className="text-gray-500">({entry.calories}c, {entry.protein.toFixed(0)}p)</span>
+                                                </div>
+                                              ))
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

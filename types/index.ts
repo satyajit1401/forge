@@ -102,4 +102,37 @@ export interface UserMetric {
   food_logs_count: number;
   coach_calls_count: number;
   last_active: string | null;
+  client: boolean;
+}
+
+export interface DailyNutrition {
+  calories: number;
+  protein: number;
+}
+
+export interface CoachAnalyticsRow {
+  user_id: string;
+  email: string;
+  target_calories: number;
+  target_protein: number;
+  maintenance_calories: number;
+  d1_calories: number;
+  d1_protein: number;
+  d2_calories: number;
+  d2_protein: number;
+  d3_calories: number;
+  d3_protein: number;
+  d4_calories: number;
+  d4_protein: number;
+  d5_calories: number;
+  d5_protein: number;
+  d6_calories: number;
+  d6_protein: number;
+  d7_calories: number;
+  d7_protein: number;
+  avg_calories: number;
+  avg_protein: number;
+  daily_deficit: number;
+  weekly_deficit: number;
+  days_logged: number;
 }
