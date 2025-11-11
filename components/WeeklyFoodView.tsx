@@ -13,6 +13,7 @@ interface WeeklyFoodViewProps {
   weeklyData: Record<string, FoodEntry[]>;
   targetCalories: number;
   targetProtein: number;
+  maintenanceCalories: number;
   viewMode: 'table' | 'log';
   onViewModeChange: (mode: 'table' | 'log') => void;
 }
@@ -22,6 +23,7 @@ export default function WeeklyFoodView({
   weeklyData,
   targetCalories,
   targetProtein,
+  maintenanceCalories,
   viewMode,
   onViewModeChange
 }: WeeklyFoodViewProps) {
@@ -73,6 +75,7 @@ export default function WeeklyFoodView({
                 entries={entries}
                 targetCalories={targetCalories}
                 targetProtein={targetProtein}
+                maintenanceCalories={maintenanceCalories}
                 viewMode={viewMode}
                 isToday={isToday}
               />

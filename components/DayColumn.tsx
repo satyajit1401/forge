@@ -15,6 +15,7 @@ interface DayColumnProps {
   entries: FoodEntry[];
   targetCalories: number;
   targetProtein: number;
+  maintenanceCalories: number;
   viewMode: 'table' | 'log';
   isToday?: boolean;
 }
@@ -25,6 +26,7 @@ export default function DayColumn({
   entries,
   targetCalories,
   targetProtein,
+  maintenanceCalories,
   viewMode,
   isToday = false
 }: DayColumnProps) {
@@ -56,6 +58,7 @@ export default function DayColumn({
           entries={entries}
           targetCalories={targetCalories}
           targetProtein={targetProtein}
+          maintenanceCalories={maintenanceCalories}
         />
       </div>
 

@@ -34,6 +34,10 @@ export default function AnalyticsScreen() {
   const [currentPage, setCurrentPage] = useState(1);
   const USERS_PER_PAGE = 15;
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+  const [adminControlsOpen, setAdminControlsOpen] = useState(false);
+  const [maxAllowedUsers, setMaxAllowedUsers] = useState(100);
+  const [totalActiveUsers, setTotalActiveUsers] = useState(0);
+  const [savedAdminControls, setSavedAdminControls] = useState(false);
 
   // Week selector for coach analytics
   const getTodayDate = (): string => {
@@ -144,6 +148,15 @@ export default function AnalyticsScreen() {
       const weekStartStr = format(weekStart, 'yyyy-MM-dd');
       const rawCoachData = await db.analytics.getCoachAnalytics(weekStartStr);
       console.log('[Analytics] Coach analytics fetched for week:', weekStartStr);
+
+      console.log('[Analytics] Fetching admin controls data...');
+      const [maxUsers, totalUsers] = await Promise.all([
+        db.admin.getMaxAllowedUsers(),
+        db.admin.getTotalActiveUsers(),
+      ]);
+      setMaxAllowedUsers(maxUsers);
+      setTotalActiveUsers(totalUsers);
+      console.log('[Analytics] Admin controls data fetched');
 
       // Calculate stats using the SAME LOGIC as dashboard
       const today = format(new Date(), 'yyyy-MM-dd');
@@ -258,6 +271,16 @@ export default function AnalyticsScreen() {
       console.error('Error toggling client flag:', err);
     } finally {
       setUpdatingClient(null);
+    }
+  };
+
+  const handleSaveAdminControls = async () => {
+    try {
+      await db.admin.updateMaxAllowedUsers(maxAllowedUsers);
+      setSavedAdminControls(true);
+      setTimeout(() => setSavedAdminControls(false), 2000);
+    } catch (err) {
+      console.error('Error saving admin controls:', err);
     }
   };
 
@@ -411,20 +434,38 @@ export default function AnalyticsScreen() {
   };
 
   // Helper function to get color coding for daily calories
-  // Green if within ±2.5% of target, yellow if within ±7.5%, else red
-  const getCaloriesColor = (calories: number, target: number) => {
+  // Asymmetric thresholds: strict on "bad" side, relaxed on "good" side
+  const getCaloriesColor = (calories: number, target: number, maintenance: number) => {
     if (calories === 0) return 'bg-gray-100 text-gray-500';
 
-    const diff = Math.abs(calories - target);
-    const percentDiff = (diff / target) * 100;
+    const diff = calories - target;
+    const percentDiff = Math.abs(diff / target) * 100;
 
-    if (percentDiff <= 2.5) return 'bg-green-100 text-green-700';
-    if (percentDiff <= 7.5) return 'bg-yellow-100 text-yellow-700';
+    const isDeficit = target < maintenance;
+    const isSurplus = target > maintenance;
+    const isAboveTarget = calories > target;
+    const isBelowTarget = calories < target;
+
+    // Determine thresholds based on direction
+    let greenThreshold, yellowThreshold;
+
+    if ((isDeficit && isBelowTarget) || (isSurplus && isAboveTarget)) {
+      // Going in the "good" direction - more relaxed
+      greenThreshold = 5.0;
+      yellowThreshold = 7.5;
+    } else {
+      // Going in the "bad" direction - strict
+      greenThreshold = 2.5;
+      yellowThreshold = 5.0;
+    }
+
+    if (percentDiff <= greenThreshold) return 'bg-green-100 text-green-700';
+    if (percentDiff <= yellowThreshold) return 'bg-yellow-100 text-yellow-700';
     return 'bg-red-100 text-red-700';
   };
 
   // Helper function to get color coding for daily protein
-  // Green if at or above target, yellow if within 7.5% below, red if more than 7.5% below
+  // Green if at or above target, yellow if within 5% below, red if more than 5% below
   const getProteinColor = (protein: number, target: number) => {
     if (protein === 0) return 'bg-gray-100 text-gray-500';
 
@@ -432,7 +473,7 @@ export default function AnalyticsScreen() {
 
     const percentBelow = ((target - protein) / target) * 100;
 
-    if (percentBelow <= 7.5) return 'bg-yellow-100 text-yellow-700';
+    if (percentBelow <= 5.0) return 'bg-yellow-100 text-yellow-700';
     return 'bg-red-100 text-red-700';
   };
 
@@ -512,7 +553,7 @@ export default function AnalyticsScreen() {
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-lg font-bold text-gray-900">Admin Analytics</h1>
+            <h1 className="text-lg font-bold text-gray-900">Admin Dashboard</h1>
             <p className="text-xs text-gray-500 mt-1">System-wide metrics and user management</p>
           </div>
           <button
@@ -521,6 +562,121 @@ export default function AnalyticsScreen() {
           >
             Refresh
           </button>
+        </div>
+
+        {/* SECTION 0: Admin Controls (Collapsible) */}
+        <div className="mb-8">
+          <button
+            onClick={() => setAdminControlsOpen(!adminControlsOpen)}
+            className="w-full bg-white rounded-xl border border-gray-200 p-4 shadow-sm hover:bg-gray-50 transition-all flex items-center justify-between"
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-bold text-purple-600">Admin Controls</span>
+              <span className="text-xs text-gray-500">User access management</span>
+            </div>
+            <svg
+              className={`w-5 h-5 text-gray-600 transition-transform ${adminControlsOpen ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {adminControlsOpen && (
+            <div className="mt-4 bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+              <div className="space-y-6">
+                {/* User Access Limit */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1.5">
+                    User Access Limit
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      value={maxAllowedUsers}
+                      onChange={(e) => setMaxAllowedUsers(parseInt(e.target.value) || 0)}
+                      className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-400 bg-white text-gray-900 font-medium text-sm"
+                    />
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">
+                      users
+                    </div>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    <span className="font-semibold">{totalActiveUsers}</span> of{' '}
+                    <span className="font-semibold">{maxAllowedUsers}</span> users have access
+                  </p>
+                </div>
+
+                {/* Tier API Limits */}
+                <div className="pt-4 border-t border-gray-200">
+                  <h3 className="text-xs font-semibold text-gray-700 mb-3 uppercase tracking-wide">
+                    Tier API Call Limits (Daily)
+                  </h3>
+                  <div className="space-y-3">
+                    {/* Basic Tier */}
+                    <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-gray-200 text-gray-700 uppercase">
+                          Basic
+                        </span>
+                      </div>
+                      <div className="flex gap-4 text-xs">
+                        <span className="text-gray-600">
+                          Food: <span className="font-semibold text-gray-900">50</span>
+                        </span>
+                        <span className="text-gray-600">
+                          Coach: <span className="font-semibold text-gray-900">10</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Pro Tier */}
+                    <div className="flex items-center justify-between p-3 bg-blue-50 rounded-lg border border-blue-200">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-blue-100 text-blue-700 uppercase">
+                          Pro
+                        </span>
+                      </div>
+                      <div className="flex gap-4 text-xs">
+                        <span className="text-gray-600">
+                          Food: <span className="font-semibold text-gray-900">100</span>
+                        </span>
+                        <span className="text-gray-600">
+                          Coach: <span className="font-semibold text-gray-900">50</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Admin Tier */}
+                    <div className="flex items-center justify-between p-3 bg-purple-50 rounded-lg border border-purple-200">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-purple-100 text-purple-700 uppercase">
+                          Admin
+                        </span>
+                      </div>
+                      <div className="flex gap-4 text-xs">
+                        <span className="text-gray-600">
+                          Food: <span className="font-semibold text-gray-900">Unlimited</span>
+                        </span>
+                        <span className="text-gray-600">
+                          Coach: <span className="font-semibold text-gray-900">Unlimited</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleSaveAdminControls}
+                  className="w-full px-4 py-2 bg-black hover:bg-gray-800 text-white rounded-lg transition-all font-medium text-sm"
+                >
+                  {savedAdminControls ? '✓ Saved!' : 'Save'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* SECTION 1: App Analytics (Collapsible) */}
@@ -999,7 +1155,7 @@ export default function AnalyticsScreen() {
                           [user.d6_calories, user.d6_protein],
                           [user.d7_calories, user.d7_protein],
                         ].map(([cal, pro], idx) => {
-                          const calColor = getCaloriesColor(cal, user.target_calories);
+                          const calColor = getCaloriesColor(cal, user.target_calories, user.maintenance_calories);
                           const proColor = getProteinColor(Number(pro), user.target_protein);
 
                           return (
@@ -1076,7 +1232,7 @@ export default function AnalyticsScreen() {
                                       const totalCal = entries.reduce((sum, e) => sum + e.calories, 0);
                                       const totalPro = entries.reduce((sum, e) => sum + e.protein, 0);
 
-                                      const calColor = getCaloriesColor(totalCal, user.target_calories);
+                                      const calColor = getCaloriesColor(totalCal, user.target_calories, user.maintenance_calories);
                                       const proColor = getProteinColor(totalPro, user.target_protein);
 
                                       return (
@@ -1109,10 +1265,10 @@ export default function AnalyticsScreen() {
                                                 </div>
                                               ))
                                             ) : (
-                                              // Log view - simple list with macros inline
+                                              // Log view - shows original user input
                                               entries.map((entry) => (
                                                 <div key={entry.id} className="text-xs text-gray-700">
-                                                  {entry.name} <span className="text-gray-500">({entry.calories}c, {entry.protein.toFixed(0)}p)</span>
+                                                  {entry.description || entry.name} <span className="text-gray-500">({entry.calories}c, {entry.protein.toFixed(0)}p)</span>
                                                 </div>
                                               ))
                                             )}

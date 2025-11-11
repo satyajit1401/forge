@@ -137,11 +137,11 @@ export default function TabLayout() {
           href: null, // Hidden for all users
         }}
       />
-      {/* Admin-only Analytics Tab */}
+      {/* Admin-only Tab */}
       <Tabs.Screen
         name="analytics"
         options={{
-          title: 'Analytics',
+          title: 'Admin',
           tabBarIcon: ({ color }) => <AnalyticsIcon color={color} />,
           headerRight: getHeaderRight,
           href: isAdmin ? undefined : null,

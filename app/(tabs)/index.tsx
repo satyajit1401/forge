@@ -417,6 +417,7 @@ export default function TrackScreen() {
             entries={entries}
             targetCalories={settings.target_calories}
             targetProtein={settings.target_protein}
+            maintenanceCalories={settings.maintenance_calories}
           />
         </div>
       </div>
