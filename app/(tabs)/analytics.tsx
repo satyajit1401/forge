@@ -9,7 +9,7 @@ import { View, Text, useWindowDimensions } from 'react-native';
 import { LineChart } from 'react-native-gifted-charts';
 import { db } from '@/lib/database';
 import { getCached, setCached, CACHE_KEYS } from '@/lib/enhanced-cache';
-import { getWeekStart, formatWeekRange } from '@/utils/weekly-stats';
+import { getWeekStart, formatWeekRange, getWeeklyStats } from '@/utils/weekly-stats';
 import { format, addDays } from 'date-fns';
 import type { AnalyticsSummary, DailyMetrics, UserMetric, CoachAnalyticsRow, FoodEntry } from '@/types';
 
@@ -158,55 +158,55 @@ export default function AnalyticsScreen() {
       setTotalActiveUsers(totalUsers);
       console.log('[Analytics] Admin controls data fetched');
 
-      // Calculate stats using the SAME LOGIC as dashboard
-      const today = format(new Date(), 'yyyy-MM-dd');
-      const coachData = rawCoachData.map((user) => {
-        // Build daily data array from the 7 day columns
-        const dailyData = [];
-        for (let i = 0; i < 7; i++) {
-          const date = addDays(weekStart, i);
-          const dateStr = format(date, 'yyyy-MM-dd');
-          const dayNum = i + 1;
-          const calories = user[`d${dayNum}_calories` as keyof typeof user] as number;
-          const protein = user[`d${dayNum}_protein` as keyof typeof user] as number;
+      // Use the same getWeeklyStats utility as the dashboard for consistency
+      const coachData = await Promise.all(
+        rawCoachData.map(async (user) => {
+          // Build daily food entries data from the 7 day columns
+          const entriesByDate: Record<string, FoodEntry[]> = {};
 
-          dailyData.push({
-            date: dateStr,
-            calories,
-            protein
-          });
-        }
+          for (let i = 0; i < 7; i++) {
+            const date = addDays(weekStart, i);
+            const dateStr = format(date, 'yyyy-MM-dd');
+            const dayNum = i + 1;
+            const calories = user[`d${dayNum}_calories` as keyof typeof user] as number;
+            const protein = user[`d${dayNum}_protein` as keyof typeof user] as number;
 
-        // MATCH DASHBOARD LOGIC: Calculate averages - EXCLUDE today and days with no food
-        const completedDaysWithFood = dailyData.filter(
-          day => day.date < today && day.calories > 0
-        );
+            // Create synthetic entries to match the expected format
+            if (calories > 0) {
+              entriesByDate[dateStr] = [{
+                id: `${user.user_id}-${dateStr}`,
+                entry_date: dateStr,
+                name: 'Daily Total',
+                calories,
+                protein,
+                created_at: dateStr,
+                user_id: user.user_id
+              }];
+            } else {
+              entriesByDate[dateStr] = [];
+            }
+          }
 
-        const avgCaloriesTotal = completedDaysWithFood.reduce((sum, day) => sum + day.calories, 0);
-        const avgProteinTotal = completedDaysWithFood.reduce((sum, day) => sum + day.protein, 0);
-        const avgDaysCount = completedDaysWithFood.length;
+          // Use getWeeklyStats utility - same logic as dashboard
+          const stats = await getWeeklyStats(
+            weekStart,
+            user.target_calories,
+            user.maintenance_calories,
+            async () => entriesByDate
+          );
 
-        const avgCalories = avgDaysCount > 0 ? Math.round(avgCaloriesTotal / avgDaysCount) : 0;
-        const avgProtein = avgDaysCount > 0 ? Math.round(avgProteinTotal / avgDaysCount) : 0;
+          return {
+            ...user,
+            avg_calories: stats.averages.calories,
+            avg_protein: stats.averages.protein,
+            daily_deficit: stats.deficit.daily,
+            weekly_deficit: stats.deficit.weekly,
+            days_logged: stats.daysLogged
+          };
+        })
+      );
 
-        // MATCH DASHBOARD LOGIC: Calculate deficit/surplus from MAINTENANCE
-        const dailyDeficit = avgCalories - user.maintenance_calories;
-        const weeklyDeficit = avgDaysCount > 0 ? dailyDeficit * avgDaysCount : 0;
-
-        // Count total days logged (including today)
-        const daysLogged = dailyData.filter(day => day.calories > 0).length;
-
-        return {
-          ...user,
-          avg_calories: avgCalories,
-          avg_protein: avgProtein,
-          daily_deficit: dailyDeficit,
-          weekly_deficit: weeklyDeficit,
-          days_logged: daysLogged
-        };
-      });
-
-      console.log('[Analytics] Coach data processed with dashboard logic:', coachData[0]);
+      console.log('[Analytics] Coach data processed using getWeeklyStats utility:', coachData[0]);
 
       console.log('[Analytics] All data fetched successfully');
 
