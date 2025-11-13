@@ -126,6 +126,7 @@ export default function TabLayout() {
           title: 'Coach',
           tabBarIcon: ({ color }) => <CoachIcon color={color} />,
           headerRight: getHeaderRight,
+          href: null, // Hidden for all users
         }}
       />
       <Tabs.Screen

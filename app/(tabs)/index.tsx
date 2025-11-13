@@ -65,6 +65,7 @@ export default function TrackScreen() {
   const [frequentItems, setFrequentItems] = useState<FrequentItem[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
   const [viewMode, setViewMode] = useState<'table' | 'log'>('table');
+  const [coachReminder, setCoachReminder] = useState<string | null>(null);
 
   // Track if we're currently mutating to prevent race conditions
   const isMutatingRef = React.useRef(false);
@@ -127,9 +128,10 @@ export default function TrackScreen() {
         }
 
         // PHASE 2: Fetch fresh data from database (revalidate in background)
-        const [freshEntries, freshSettings] = await Promise.all([
+        const [freshEntries, freshSettings, reminder] = await Promise.all([
           db.food.getByDate(currentDate),
           db.settings.get(),
+          db.access.getReminder(),
         ]);
 
         if (!isMounted) return;
@@ -147,6 +149,7 @@ export default function TrackScreen() {
         // Update UI silently (data already showing if cached)
         setEntries(freshEntries);
         setSettings(freshSettings);
+        setCoachReminder(reminder);
         setLoading(false);
 
       } catch (err: any) {
@@ -421,6 +424,17 @@ export default function TrackScreen() {
           />
         </div>
       </div>
+
+      {/* Coach Reminder */}
+      {coachReminder && (
+        <div className="px-4 md:px-6 lg:px-8 pt-3">
+          <div className="max-w-7xl mx-auto">
+            <div className="bg-purple-50 border border-purple-200 rounded-lg px-4 py-2.5">
+              <p className="text-sm text-purple-800">{coachReminder}</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Loading Spinner */}
       {loading && (

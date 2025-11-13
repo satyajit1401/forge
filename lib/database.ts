@@ -244,6 +244,23 @@ export const db = {
         hasAccess: data[0].has_access
       };
     },
+
+    /**
+     * Get coach reminder for current user
+     */
+    getReminder: async (): Promise<string | null> => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+
+      const { data, error } = await supabase
+        .from('user_profiles')
+        .select('coach_reminder')
+        .eq('user_id', user.id)
+        .single();
+
+      if (error) return null;
+      return data?.coach_reminder || null;
+    },
   },
 
   // ============================================
@@ -401,6 +418,41 @@ export const db = {
           target_user_id: userId,
           new_client_value: isClient,
         });
+
+      if (error) throw error;
+    },
+
+    /**
+     * Update user's coach reminder (admin only)
+     */
+    updateUserReminder: async (userId: string, reminder: string | null): Promise<void> => {
+      const { error } = await supabase
+        .rpc('admin_update_user_reminder', {
+          target_user_id: userId,
+          reminder_message: reminder,
+        });
+
+      if (error) throw error;
+    },
+
+    /**
+     * Update user's macro targets (admin only)
+     */
+    updateUserMacros: async (
+      userId: string,
+      maintenanceCalories: number,
+      targetCalories: number,
+      targetProtein: number
+    ): Promise<void> => {
+      const { error } = await supabase
+        .from('user_settings')
+        .update({
+          maintenance_calories: maintenanceCalories,
+          target_calories: targetCalories,
+          target_protein: targetProtein,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', userId);
 
       if (error) throw error;
     },

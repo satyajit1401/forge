@@ -103,6 +103,10 @@ export interface UserMetric {
   coach_calls_count: number;
   last_active: string | null;
   client: boolean;
+  maintenance_calories: number;
+  target_calories: number;
+  target_protein: number;
+  coach_reminder: string | null;
 }
 
 export interface DailyNutrition {
@@ -135,4 +139,24 @@ export interface CoachAnalyticsRow {
   daily_deficit: number;
   weekly_deficit: number;
   days_logged: number;
+}
+
+export interface MealTableRow {
+  meal: string;
+  timing: string;
+  examples: string[];
+  avgCal: number;
+  avgPro: number;
+  frequency: string;
+  change: string | null;  // "ADD 2 eggs → +140cal, +12g pro" or null
+}
+
+export interface MealCoachingAnalysis {
+  mealTable: MealTableRow[];
+  totals: {
+    currentCal: number;
+    currentPro: number;
+    targetCal: number;
+    targetPro: number;
+  };
 }

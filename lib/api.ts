@@ -84,6 +84,56 @@ export const api = {
       conversationHistory: conversationHistory || [],
     });
   },
+
+  // ============================================
+  // MEAL COACHING ANALYSIS (OpenAI GPT-4o)
+  // ============================================
+
+  /**
+   * Analyze weekly meal patterns and provide coaching suggestions
+   * Calls Supabase Edge Function which calls OpenAI GPT-4o
+   * @param userId - User ID to analyze
+   * @param weekEntries - Array of meal entries with timestamps
+   * @param targets - User's nutrition targets
+   * @returns Meal coaching analysis with actionable suggestions
+   */
+  analyzeMealCoaching: async (
+    userId: string,
+    weekEntries: Array<{
+      date: string;
+      time: string;
+      food: string;
+      calories: number;
+      protein: number;
+    }>,
+    targets: {
+      calories: number;
+      protein: number;
+      maintenance: number;
+    }
+  ): Promise<{
+    mealTable: Array<{
+      meal: string;
+      timing: string;
+      examples: string[];
+      avgCal: number;
+      avgPro: number;
+      frequency: string;
+      change: string | null;
+    }>;
+    totals: {
+      currentCal: number;
+      currentPro: number;
+      targetCal: number;
+      targetPro: number;
+    };
+  }> => {
+    return invokeFunction('analyze-meal-coaching', {
+      user_id: userId,
+      week_entries: weekEntries,
+      targets,
+    });
+  },
 };
 
 /**

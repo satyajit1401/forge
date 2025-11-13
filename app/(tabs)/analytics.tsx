@@ -8,10 +8,11 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, useWindowDimensions } from 'react-native';
 import { LineChart } from 'react-native-gifted-charts';
 import { db } from '@/lib/database';
+import { api } from '@/lib/api';
 import { getCached, setCached, CACHE_KEYS } from '@/lib/enhanced-cache';
 import { getWeekStart, formatWeekRange, getWeeklyStats } from '@/utils/weekly-stats';
 import { format, addDays } from 'date-fns';
-import type { AnalyticsSummary, DailyMetrics, UserMetric, CoachAnalyticsRow, FoodEntry } from '@/types';
+import type { AnalyticsSummary, DailyMetrics, UserMetric, CoachAnalyticsRow, FoodEntry, MealCoachingAnalysis } from '@/types';
 
 // Cache TTL: 5 minutes (analytics don't need to be real-time)
 const ANALYTICS_CACHE_TTL = 5 * 60 * 1000;
@@ -28,6 +29,9 @@ export default function AnalyticsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [updatingTier, setUpdatingTier] = useState<string | null>(null);
   const [updatingClient, setUpdatingClient] = useState<string | null>(null);
+  const [updatingMacros, setUpdatingMacros] = useState<string | null>(null);
+  const [updatingReminder, setUpdatingReminder] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
   const [appAnalyticsOpen, setAppAnalyticsOpen] = useState(false);
   const [userSelectorOpen, setUserSelectorOpen] = useState(true);
   const [selectedUsers, setSelectedUsers] = useState<Set<string>>(new Set());
@@ -49,8 +53,10 @@ export default function AnalyticsScreen() {
   // Expandable rows state
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [expandedRowsData, setExpandedRowsData] = useState<Map<string, Record<string, FoodEntry[]>>>(new Map());
-  const [expandedRowViewMode, setExpandedRowViewMode] = useState<Map<string, 'table' | 'log'>>(new Map());
+  const [expandedRowViewMode, setExpandedRowViewMode] = useState<Map<string, 'table' | 'log' | 'coaching'>>(new Map());
   const [loadingExpanded, setLoadingExpanded] = useState<Set<string>>(new Set());
+  const [coachingAnalysisData, setCoachingAnalysisData] = useState<Map<string, MealCoachingAnalysis>>(new Map());
+  const [loadingCoaching, setLoadingCoaching] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     checkAdminAndLoadAnalytics();
@@ -274,6 +280,68 @@ export default function AnalyticsScreen() {
     }
   };
 
+  const handleMacroUpdate = async (
+    userId: string,
+    maintenance: number,
+    target: number,
+    protein: number
+  ) => {
+    setUpdatingMacros(userId);
+    try {
+      await db.analytics.updateUserMacros(userId, maintenance, target, protein);
+
+      // Update local state optimistically
+      setUserMetrics(prev =>
+        prev.map(user =>
+          user.user_id === userId
+            ? {
+                ...user,
+                maintenance_calories: maintenance,
+                target_calories: target,
+                target_protein: protein,
+              }
+            : user
+        )
+      );
+
+      // Reload analytics to sync with server
+      await loadAnalytics(true); // Force refresh to clear cache
+    } catch (err) {
+      console.error('Error updating user macros:', err);
+      alert('Failed to update macros');
+    } finally {
+      setUpdatingMacros(null);
+    }
+  };
+
+  const handleReminderUpdate = async (userId: string, reminder: string) => {
+    setUpdatingReminder(userId);
+    try {
+      const trimmedReminder = reminder.trim();
+      await db.analytics.updateUserReminder(
+        userId,
+        trimmedReminder === '' ? null : trimmedReminder
+      );
+
+      // Update local state optimistically
+      setUserMetrics(prev =>
+        prev.map(user =>
+          user.user_id === userId
+            ? { ...user, coach_reminder: trimmedReminder || null }
+            : user
+        )
+      );
+
+      // Reload analytics to sync with server
+      await loadAnalytics(true); // Force refresh to clear cache
+    } catch (err) {
+      console.error('Error updating reminder:', err);
+      alert('Failed to update reminder');
+    } finally {
+      setUpdatingReminder(null);
+    }
+  };
+
   const handleSaveAdminControls = async () => {
     try {
       await db.admin.updateMaxAllowedUsers(maxAllowedUsers);
@@ -402,8 +470,69 @@ export default function AnalyticsScreen() {
     }
   };
 
-  const updateViewMode = (userId: string, mode: 'table' | 'log') => {
+  const updateViewMode = async (userId: string, mode: 'table' | 'log' | 'coaching') => {
     setExpandedRowViewMode(prev => new Map(prev).set(userId, mode));
+
+    // If switching to coaching view, load analysis if not cached
+    if (mode === 'coaching' && !coachingAnalysisData.has(userId)) {
+      await loadCoachingAnalysis(userId);
+    }
+  };
+
+  const loadCoachingAnalysis = async (userId: string) => {
+    setLoadingCoaching(prev => new Set(prev).add(userId));
+
+    try {
+      // Get user data from coachAnalytics
+      const user = coachAnalytics.find(u => u.user_id === userId);
+      if (!user) {
+        console.error('[Analytics] User not found in coachAnalytics:', userId);
+        return;
+      }
+
+      // Get the week's entries for this user
+      const weekEnd = addDays(weekStart, 6);
+      const startDate = format(weekStart, 'yyyy-MM-dd');
+      const endDate = format(weekEnd, 'yyyy-MM-dd');
+
+      const userEntries = await db.analytics.getUserFoodEntries(userId, startDate, endDate);
+
+      // Filter out today's incomplete data to avoid skewing the analysis
+      const today = getTodayDate();
+      const filteredEntries = userEntries.filter(entry => entry.entry_date !== today);
+
+      // Format entries for AI with timestamps
+      const weekEntries = filteredEntries.map(entry => ({
+        date: entry.entry_date,
+        time: format(new Date(entry.created_at), 'HH:mm'),
+        food: entry.description || entry.name,
+        calories: entry.calories,
+        protein: entry.protein
+      }));
+
+      // Call the Edge Function via API abstraction
+      const analysis = await api.analyzeMealCoaching(
+        userId,
+        weekEntries,
+        {
+          calories: user.target_calories,
+          protein: user.target_protein,
+          maintenance: user.maintenance_calories
+        }
+      );
+
+      // Cache the result
+      setCoachingAnalysisData(prev => new Map(prev).set(userId, analysis));
+    } catch (err: any) {
+      console.error('[Analytics] Error loading coaching analysis:', err);
+      alert(err.message || 'Failed to load coaching analysis');
+    } finally {
+      setLoadingCoaching(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(userId);
+        return newSet;
+      });
+    }
   };
 
   const formatDate = (dateString: string) => {
@@ -540,9 +669,26 @@ export default function AnalyticsScreen() {
 
   const filteredCoachAnalytics = coachAnalytics.filter(user => selectedUsers.has(user.user_id));
 
+  // Search and sort user metrics
+  const filteredAndSortedUserMetrics = userMetrics
+    // Filter by search query
+    .filter(user =>
+      searchQuery === '' ||
+      user.email.toLowerCase().includes(searchQuery.toLowerCase())
+    )
+    // Sort by: 1) client status (true first), 2) food logs count (descending)
+    .sort((a, b) => {
+      // First sort by client status (clients first)
+      if (a.client !== b.client) {
+        return a.client ? -1 : 1;
+      }
+      // Then sort by food logs count (descending)
+      return b.food_logs_count - a.food_logs_count;
+    });
+
   // Pagination for user metrics
-  const totalPages = Math.ceil(userMetrics.length / USERS_PER_PAGE);
-  const paginatedUserMetrics = userMetrics.slice(
+  const totalPages = Math.ceil(filteredAndSortedUserMetrics.length / USERS_PER_PAGE);
+  const paginatedUserMetrics = filteredAndSortedUserMetrics.slice(
     (currentPage - 1) * USERS_PER_PAGE,
     currentPage * USERS_PER_PAGE
   );
@@ -839,13 +985,36 @@ export default function AnalyticsScreen() {
               {/* User Metrics Table */}
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="p-6 border-b border-gray-200">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between mb-4">
                     <div>
                       <h2 className="text-sm font-bold text-gray-900">User Activity</h2>
                       <p className="text-xs text-gray-500 mt-0.5">
-                        Showing {userMetrics.length > 0 ? (currentPage - 1) * USERS_PER_PAGE + 1 : 0}-{Math.min(currentPage * USERS_PER_PAGE, userMetrics.length)} of {userMetrics.length} users
+                        Showing {filteredAndSortedUserMetrics.length > 0 ? (currentPage - 1) * USERS_PER_PAGE + 1 : 0}-{Math.min(currentPage * USERS_PER_PAGE, filteredAndSortedUserMetrics.length)} of {filteredAndSortedUserMetrics.length} users
+                        {searchQuery && ` (filtered from ${userMetrics.length} total)`}
                       </p>
                     </div>
+                  </div>
+
+                  {/* Search Input */}
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Search users by email..."
+                      value={searchQuery}
+                      onChange={(e) => {
+                        setSearchQuery(e.target.value);
+                        setCurrentPage(1); // Reset to first page on search
+                      }}
+                      className="w-full px-4 py-2.5 pl-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-400 bg-white text-gray-900 text-sm"
+                    />
+                    <svg
+                      className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
                   </div>
                 </div>
 
@@ -863,6 +1032,10 @@ export default function AnalyticsScreen() {
                             <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">User #</th>
                             <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Tier</th>
                             <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Client</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Maintenance Cal</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Target Cal</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Target Pro</th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Coach Reminder</th>
                             <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Food Logs</th>
                             <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Coach Calls</th>
                             <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Last Active</th>
@@ -897,6 +1070,78 @@ export default function AnalyticsScreen() {
                                 >
                                   {updatingClient === user.user_id ? '...' : user.client ? 'YES' : 'NO'}
                                 </button>
+                              </td>
+                              <td className="px-6 py-4">
+                                <input
+                                  type="number"
+                                  defaultValue={user.maintenance_calories}
+                                  onBlur={(e) => {
+                                    const newValue = parseInt(e.target.value) || user.maintenance_calories;
+                                    if (newValue !== user.maintenance_calories) {
+                                      handleMacroUpdate(
+                                        user.user_id,
+                                        newValue,
+                                        user.target_calories,
+                                        user.target_protein
+                                      );
+                                    }
+                                  }}
+                                  disabled={updatingMacros === user.user_id}
+                                  className="w-24 px-2 py-1 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-400"
+                                />
+                              </td>
+                              <td className="px-6 py-4">
+                                <input
+                                  type="number"
+                                  defaultValue={user.target_calories}
+                                  onBlur={(e) => {
+                                    const newValue = parseInt(e.target.value) || user.target_calories;
+                                    if (newValue !== user.target_calories) {
+                                      handleMacroUpdate(
+                                        user.user_id,
+                                        user.maintenance_calories,
+                                        newValue,
+                                        user.target_protein
+                                      );
+                                    }
+                                  }}
+                                  disabled={updatingMacros === user.user_id}
+                                  className="w-24 px-2 py-1 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-400"
+                                />
+                              </td>
+                              <td className="px-6 py-4">
+                                <input
+                                  type="number"
+                                  defaultValue={user.target_protein}
+                                  onBlur={(e) => {
+                                    const newValue = parseInt(e.target.value) || user.target_protein;
+                                    if (newValue !== user.target_protein) {
+                                      handleMacroUpdate(
+                                        user.user_id,
+                                        user.maintenance_calories,
+                                        user.target_calories,
+                                        newValue
+                                      );
+                                    }
+                                  }}
+                                  disabled={updatingMacros === user.user_id}
+                                  className="w-24 px-2 py-1 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-400"
+                                />
+                              </td>
+                              <td className="px-6 py-4">
+                                <textarea
+                                  defaultValue={user.coach_reminder || ''}
+                                  onBlur={(e) => {
+                                    const newValue = e.target.value.trim();
+                                    if (newValue !== (user.coach_reminder || '')) {
+                                      handleReminderUpdate(user.user_id, newValue);
+                                    }
+                                  }}
+                                  disabled={updatingReminder === user.user_id}
+                                  placeholder="No reminder set"
+                                  className="w-64 px-2 py-1 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-400 resize-none"
+                                  rows={2}
+                                />
                               </td>
                               <td className="px-6 py-4 text-sm text-gray-700">{user.food_logs_count}</td>
                               <td className="px-6 py-4 text-sm text-gray-700">{user.coach_calls_count}</td>
@@ -1216,68 +1461,187 @@ export default function AnalyticsScreen() {
                                       >
                                         Log
                                       </button>
+                                      <button
+                                        onClick={() => updateViewMode(user.user_id, 'coaching')}
+                                        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                                          (expandedRowViewMode.get(user.user_id) || 'table') === 'coaching'
+                                            ? 'bg-black text-white'
+                                            : 'text-gray-600 hover:text-gray-900'
+                                        }`}
+                                      >
+                                        Coaching
+                                      </button>
                                     </div>
                                   </div>
 
-                                  <div className="overflow-x-auto">
-                                    <div className="flex gap-6 min-w-max">
-                                    {/* Render each day */}
-                                    {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((dayName, idx) => {
-                                      const date = addDays(weekStart, idx);
-                                      const dateStr = format(date, 'yyyy-MM-dd');
-                                      const entries = expandedRowsData.get(user.user_id)?.[dateStr] || [];
-                                      const viewMode = expandedRowViewMode.get(user.user_id) || 'table';
-
-                                      // Calculate totals for this day
-                                      const totalCal = entries.reduce((sum, e) => sum + e.calories, 0);
-                                      const totalPro = entries.reduce((sum, e) => sum + e.protein, 0);
-
-                                      const calColor = getCaloriesColor(totalCal, user.target_calories, user.maintenance_calories);
-                                      const proColor = getProteinColor(totalPro, user.target_protein);
-
-                                      return (
-                                        <div key={dateStr} className="flex-shrink-0 w-52">
-                                          {/* Day Header with totals */}
-                                          <div className="mb-2">
-                                            <div className="text-xs font-bold text-gray-900">{dayName} {format(date, 'M/d')}</div>
-                                            {totalCal === 0 ? (
-                                              <div className="text-xs text-gray-400 mt-1">-</div>
-                                            ) : (
-                                              <div className="flex gap-2 mt-1">
-                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${calColor}`}>
-                                                  {totalCal}
-                                                </span>
-                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${proColor}`}>
-                                                  {totalPro.toFixed(0)}g
-                                                </span>
-                                              </div>
-                                            )}
-                                          </div>
-
-                                          {/* Food entries */}
-                                          <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                                            {viewMode === 'table' ? (
-                                              // Table view - compact with macros
-                                              entries.map((entry) => (
-                                                <div key={entry.id} className="text-xs">
-                                                  <div className="font-medium text-gray-700">{entry.name}</div>
-                                                  <div className="text-gray-500">{entry.calories}c • {entry.protein.toFixed(0)}p</div>
-                                                </div>
-                                              ))
-                                            ) : (
-                                              // Log view - shows original user input
-                                              entries.map((entry) => (
-                                                <div key={entry.id} className="text-xs text-gray-700">
-                                                  {entry.description || entry.name} <span className="text-gray-500">({entry.calories}c, {entry.protein.toFixed(0)}p)</span>
-                                                </div>
-                                              ))
-                                            )}
-                                          </div>
+                                  {/* Render content based on view mode */}
+                                  {(expandedRowViewMode.get(user.user_id) || 'table') === 'coaching' ? (
+                                    // Coaching View
+                                    loadingCoaching.has(user.user_id) ? (
+                                      <div className="flex items-center justify-center py-12">
+                                        <div className="flex items-center gap-3">
+                                          <svg className="animate-spin h-5 w-5 text-gray-900" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                          </svg>
+                                          <span className="text-gray-900 font-medium text-sm">Analyzing meal patterns...</span>
                                         </div>
-                                      );
-                                    })}
+                                      </div>
+                                    ) : coachingAnalysisData.has(user.user_id) ? (
+(() => {
+                                        const analysis = coachingAnalysisData.get(user.user_id)!;
+                                        return (
+                                          <div className="space-y-4">
+                                            {/* Simple Table */}
+                                            <div className="overflow-x-auto">
+                                              <table className="w-full border border-gray-200 rounded-lg">
+                                                <thead>
+                                                  <tr className="bg-gray-50 border-b border-gray-200">
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Meal & Timing</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Examples</th>
+                                                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700 uppercase">Cal</th>
+                                                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-700 uppercase">Pro</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Frequency</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Recommended Change</th>
+                                                  </tr>
+                                                </thead>
+                                                <tbody>
+                                                  {analysis.mealTable.map((meal, idx) => (
+                                                    <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                                                      <td className="px-4 py-3">
+                                                        <div className="text-sm font-semibold text-gray-900">{meal.meal}</div>
+                                                        <div className="text-xs text-gray-500 mt-0.5">⏰ {meal.timing}</div>
+                                                      </td>
+                                                      <td className="px-4 py-3 text-xs text-gray-700">
+                                                        {meal.examples.join(', ')}
+                                                      </td>
+                                                      <td className="px-4 py-3 text-center text-sm font-medium text-gray-900">{meal.avgCal}</td>
+                                                      <td className="px-4 py-3 text-center text-sm font-medium text-gray-900">{meal.avgPro}g</td>
+                                                      <td className="px-4 py-3 text-xs text-gray-700">{meal.frequency}</td>
+                                                      <td className="px-4 py-3">
+                                                        {meal.change ? (
+                                                          <div className="text-sm text-green-700 font-medium">{meal.change}</div>
+                                                        ) : (
+                                                          <span className="text-xs text-gray-400">-</span>
+                                                        )}
+                                                      </td>
+                                                    </tr>
+                                                  ))}
+
+                                                  {/* Totals Row */}
+                                                  <tr className="bg-gray-50 border-t-2 border-gray-300">
+                                                    <td className="px-4 py-3 text-sm font-bold text-gray-900">Daily Avg</td>
+                                                    <td className="px-4 py-3 text-xs text-gray-400">-</td>
+                                                    <td className="px-4 py-3 text-center">
+                                                      <div className="text-sm font-bold text-gray-900">{analysis.totals.currentCal} cal</div>
+                                                      <div className="text-xs text-gray-500">Target: {analysis.totals.targetCal}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-center">
+                                                      <div className="text-sm font-bold text-gray-900">{analysis.totals.currentPro}g</div>
+                                                      <div className="text-xs text-gray-500">Target: {analysis.totals.targetPro}g</div>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-gray-400">-</td>
+                                                    <td className="px-4 py-3">
+                                                      {(() => {
+                                                        const calGap = analysis.totals.targetCal - analysis.totals.currentCal;
+                                                        const proGap = analysis.totals.targetPro - analysis.totals.currentPro;
+                                                        return (
+                                                          <div className="text-xs">
+                                                            <div className={calGap > 0 ? 'text-red-600 font-medium' : 'text-green-600 font-medium'}>
+                                                              Cal: {calGap > 0 ? '+' : ''}{calGap}
+                                                            </div>
+                                                            <div className={proGap > 0 ? 'text-red-600 font-medium' : 'text-green-600 font-medium'}>
+                                                              Pro: {proGap > 0 ? '+' : ''}{proGap}g
+                                                            </div>
+                                                          </div>
+                                                        );
+                                                      })()}
+                                                    </td>
+                                                  </tr>
+                                                </tbody>
+                                              </table>
+                                            </div>
+
+                                            {/* Refresh Button */}
+                                            <button
+                                              onClick={async () => {
+                                                // Clear cache and reload
+                                                setCoachingAnalysisData(prev => {
+                                                  const newMap = new Map(prev);
+                                                  newMap.delete(user.user_id);
+                                                  return newMap;
+                                                });
+                                                await loadCoachingAnalysis(user.user_id);
+                                              }}
+                                              className="px-4 py-2 border border-gray-200 bg-white rounded-lg text-sm font-medium text-gray-900 hover:bg-gray-50 transition-all"
+                                            >
+                                              Refresh Analysis
+                                            </button>
+                                          </div>
+                                        );
+                                      })()
+                                    ) : null
+                                  ) : (
+                                    <div className="overflow-x-auto">
+                                      <div className="flex gap-6 min-w-max">
+                                        {/* Render each day */}
+                                        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((dayName, idx) => {
+                                          const date = addDays(weekStart, idx);
+                                          const dateStr = format(date, 'yyyy-MM-dd');
+                                          const entries = expandedRowsData.get(user.user_id)?.[dateStr] || [];
+                                          const viewMode = expandedRowViewMode.get(user.user_id) || 'table';
+
+                                          // Calculate totals for this day
+                                          const totalCal = entries.reduce((sum, e) => sum + e.calories, 0);
+                                          const totalPro = entries.reduce((sum, e) => sum + e.protein, 0);
+
+                                          const calColor = getCaloriesColor(totalCal, user.target_calories, user.maintenance_calories);
+                                          const proColor = getProteinColor(totalPro, user.target_protein);
+
+                                          return (
+                                            <div key={dateStr} className="flex-shrink-0 w-52">
+                                              {/* Day Header with totals */}
+                                              <div className="mb-2">
+                                                <div className="text-xs font-bold text-gray-900">{dayName} {format(date, 'M/d')}</div>
+                                                {totalCal === 0 ? (
+                                                  <div className="text-xs text-gray-400 mt-1">-</div>
+                                                ) : (
+                                                  <div className="flex gap-2 mt-1">
+                                                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${calColor}`}>
+                                                      {totalCal}
+                                                    </span>
+                                                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${proColor}`}>
+                                                      {totalPro.toFixed(0)}g
+                                                    </span>
+                                                  </div>
+                                                )}
+                                              </div>
+
+                                              {/* Food entries */}
+                                              <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                                                {viewMode === 'table' ? (
+                                                  // Table view - compact with macros
+                                                  entries.map((entry) => (
+                                                    <div key={entry.id} className="text-xs">
+                                                      <div className="font-medium text-gray-700">{entry.name}</div>
+                                                      <div className="text-gray-500">{entry.calories}c • {entry.protein.toFixed(0)}p</div>
+                                                    </div>
+                                                  ))
+                                                ) : (
+                                                  // Log view - shows original user input
+                                                  entries.map((entry) => (
+                                                    <div key={entry.id} className="text-xs text-gray-700">
+                                                      {entry.description || entry.name} <span className="text-gray-500">({entry.calories}c, {entry.protein.toFixed(0)}p)</span>
+                                                    </div>
+                                                  ))
+                                                )}
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
                                     </div>
-                                  </div>
+                                  )}
                                 </div>
                               )}
                             </td>
