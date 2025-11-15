@@ -445,14 +445,12 @@ export const db = {
       targetProtein: number
     ): Promise<void> => {
       const { error } = await supabase
-        .from('user_settings')
-        .update({
-          maintenance_calories: maintenanceCalories,
-          target_calories: targetCalories,
-          target_protein: targetProtein,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('user_id', userId);
+        .rpc('admin_update_user_macros', {
+          target_user_id: userId,
+          maintenance_cal: maintenanceCalories,
+          target_cal: targetCalories,
+          target_pro: targetProtein,
+        });
 
       if (error) throw error;
     },
